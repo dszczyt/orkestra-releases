@@ -6,7 +6,7 @@
 
 Deterministic workflow orchestration on PostgreSQL alone: declarative YAML, every run pinned to a commit and replayable, started from the CLI or the HTTP API, on a cron schedule, or by firing a trigger. Self-hosted, MIT licensed.
 
-Status: v0.2.0-alpha.1 (prerelease). Expect rough edges and breaking changes before 1.0.
+Status: v0.2.0-alpha.2 (prerelease). Expect rough edges and breaking changes before 1.0.
 
 ---
 
@@ -17,7 +17,7 @@ Status: v0.2.0-alpha.1 (prerelease). Expect rough edges and breaking changes bef
 brew install dszczyt/tap/orkestra
 
 # Container image (server and worker), tagged by release, for example
-docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.1
+docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.2
 ```
 
 Prebuilt binaries for Linux, macOS and Windows are on the [releases page](https://github.com/dszczyt/orkestra-releases/releases). Download the archive for your platform, extract it and put `orkestra` on your `PATH`.
