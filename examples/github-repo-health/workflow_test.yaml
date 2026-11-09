@@ -1,0 +1,164 @@
+# Tests for examples/reference/github-repo-health/workflow.yaml
+# Run: orkestra test workflow.yaml workflow_test.yaml
+
+# =========================
+# MOCKS
+# =========================
+---
+kind: orkestra/test/mock/http
+name: mock_repo_active
+spec:
+  request:
+    method: GET
+    target: /repos/torvalds/linux
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {
+        "name": "linux",
+        "full_name": "torvalds/linux",
+        "archived": false,
+        "stargazers_count": 182000,
+        "pushed_at": "2026-04-29T00:00:00Z"
+      }
+
+---
+kind: orkestra/test/mock/http
+name: mock_repo_archived
+spec:
+  request:
+    method: GET
+    target: /repos/torvalds/linux
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {
+        "name": "linux",
+        "full_name": "torvalds/linux",
+        "archived": true,
+        "stargazers_count": 182000,
+        "pushed_at": "2024-01-01T00:00:00Z"
+      }
+
+---
+kind: orkestra/test/mock/http
+name: mock_issues_few
+spec:
+  request:
+    method: GET
+    target: /repos/torvalds/linux/issues
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      [
+        {"id": 1, "title": "Bug in scheduler", "state": "open"},
+        {"id": 2, "title": "Memory leak in driver", "state": "open"}
+      ]
+
+---
+kind: orkestra/test/mock/http
+name: mock_issues_many
+spec:
+  request:
+    method: GET
+    target: /repos/torvalds/linux/issues
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    # 101 issues - exceeds issue_count_threshold: 100 in globals
+    body: '[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":6},{"id":7},{"id":8},{"id":9},{"id":10},{"id":11},{"id":12},{"id":13},{"id":14},{"id":15},{"id":16},{"id":17},{"id":18},{"id":19},{"id":20},{"id":21},{"id":22},{"id":23},{"id":24},{"id":25},{"id":26},{"id":27},{"id":28},{"id":29},{"id":30},{"id":31},{"id":32},{"id":33},{"id":34},{"id":35},{"id":36},{"id":37},{"id":38},{"id":39},{"id":40},{"id":41},{"id":42},{"id":43},{"id":44},{"id":45},{"id":46},{"id":47},{"id":48},{"id":49},{"id":50},{"id":51},{"id":52},{"id":53},{"id":54},{"id":55},{"id":56},{"id":57},{"id":58},{"id":59},{"id":60},{"id":61},{"id":62},{"id":63},{"id":64},{"id":65},{"id":66},{"id":67},{"id":68},{"id":69},{"id":70},{"id":71},{"id":72},{"id":73},{"id":74},{"id":75},{"id":76},{"id":77},{"id":78},{"id":79},{"id":80},{"id":81},{"id":82},{"id":83},{"id":84},{"id":85},{"id":86},{"id":87},{"id":88},{"id":89},{"id":90},{"id":91},{"id":92},{"id":93},{"id":94},{"id":95},{"id":96},{"id":97},{"id":98},{"id":99},{"id":100},{"id":101}]'
+
+---
+kind: orkestra/test/mock/http
+name: mock_webhook
+spec:
+  request:
+    method: POST
+    target: /your-token-here
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"status": "ok"}
+
+# =========================
+# OPERATION TESTS
+# =========================
+---
+kind: orkestra/test/operation
+name: test_get_repo_info_returns_metadata
+spec:
+  operation: get_repo_info
+  mocks:
+    - mock_repo_active
+  input: |
+    {}
+  expectations:
+    - type: exactly
+      expected: 200
+      actual: .status_code
+      failure: "status code should be 200"
+    - type: exactly
+      expected: false
+      actual: .body.archived
+      failure: "repo should not be archived"
+    - type: exactly
+      expected: "torvalds/linux"
+      actual: .body.full_name
+      failure: "full_name mismatch"
+
+# =========================
+# WORKFLOW TESTS
+# =========================
+---
+kind: orkestra/test/workflow
+name: test_healthy_repo
+spec:
+  input: |
+    {}
+  phases:
+    - name: healthy
+      mocks: [mock_repo_active, mock_issues_few, mock_webhook]
+      expectations:
+        - type: exactly
+          expected: "ok"
+          actual: .steps.report_healthy.body.status
+          failure: "healthy report should be delivered"
+
+---
+kind: orkestra/test/workflow
+name: test_archived_repo_flagged_unhealthy
+spec:
+  input: |
+    {}
+  phases:
+    - name: archived
+      mocks: [mock_repo_archived, mock_webhook]
+      expectations:
+        - type: exactly
+          expected: "ok"
+          actual: .steps.report_unhealthy.body.status
+          failure: "unhealthy report should be delivered"
+
+---
+kind: orkestra/test/workflow
+name: test_too_many_issues_flagged_unhealthy
+spec:
+  input: |
+    {}
+  phases:
+    - name: many_issues
+      mocks: [mock_repo_active, mock_issues_many, mock_webhook]
+      expectations:
+        - type: exactly
+          expected: "ok"
+          actual: .steps.report_unhealthy.body.status
+          failure: "unhealthy report should be delivered"

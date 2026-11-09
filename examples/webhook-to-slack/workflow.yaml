@@ -1,0 +1,70 @@
+# Input: {"text": "Deploy finished", "channel": "#ops"}
+kind: orkestra/workflow
+name: webhook_to_slack
+spec:
+  initial_step: post_to_slack
+  input: |
+    .
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  # Replace with your Slack incoming webhook URL (never commit a real one).
+  slack_webhook_url: "https://hooks.slack.com/services/T000/B000/XXXX"
+  # Receives {"slack_status": <code>} once Slack has answered.
+  result_webhook: "https://webhook.site/your-token-here"
+
+---
+kind: orkestra/operation/http
+name: post_to_slack
+spec:
+  method: POST
+  url: |
+    .globals.slack_webhook_url
+  body: |
+    {"text": .input.text}
+
+---
+kind: orkestra/operation/http
+name: record_status
+spec:
+  method: POST
+  url: |
+    .globals.result_webhook
+  body: |
+    {"slack_status": task("post_to_slack").output.status_code, "channel": .input.channel}
+
+---
+kind: orkestra/step
+name: post_to_slack
+spec:
+  operation: post_to_slack
+
+---
+kind: orkestra/step
+name: record_status
+spec:
+  operation: record_status
+
+---
+kind: orkestra/transition
+name: posted
+spec:
+  from: post_to_slack
+  to: record_status
+
+---
+kind: orkestra/transition
+name: done
+spec:
+  from: record_status
+  status: completed
+
+---
+kind: orkestra/trigger
+name: on_message
+spec:
+  kind: http
+  # The dispatcher loads this as a path: a self-hosted copy should point at its own URL or file.
+  workflow: https://github.com/dszczyt/orkestra-releases/blob/main/examples/webhook-to-slack/workflow.yaml

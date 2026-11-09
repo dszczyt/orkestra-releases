@@ -1,0 +1,147 @@
+---
+kind: orkestra/workflow
+name: github_repo_health
+spec:
+  initial_step: get_repo_info
+  input: |
+    .
+  # Input: {}  (all config in globals)
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  github_api_url: "https://api.github.com"
+  owner: "torvalds"
+  repo: "linux"
+  issue_count_threshold: 100
+  alert_webhook: "https://webhook.site/your-token-here"
+
+# =========================
+# OPERATIONS
+# =========================
+---
+kind: orkestra/operation/http
+name: get_repo_info
+spec:
+  method: GET
+  url: |
+    "\(.globals.github_api_url)/repos/\(.globals.owner)/\(.globals.repo)"
+  headers: |
+    {
+      "Accept": ["application/vnd.github.v3+json"],
+      "User-Agent": ["orkestra-workflow"]
+    }
+
+---
+kind: orkestra/operation/http
+name: get_open_issues
+spec:
+  method: GET
+  url: |
+    "\(.globals.github_api_url)/repos/\(.globals.owner)/\(.globals.repo)/issues?state=open&per_page=100"
+  headers: |
+    {
+      "Accept": ["application/vnd.github.v3+json"],
+      "User-Agent": ["orkestra-workflow"]
+    }
+
+---
+kind: orkestra/operation/http
+name: report_healthy
+spec:
+  method: POST
+  url: |
+    .globals.alert_webhook
+  body: |
+    {
+      repo: "\(.globals.owner)/\(.globals.repo)",
+      status: "healthy",
+      open_issues: (task("get_open_issues").output.body | length)
+    }
+
+---
+kind: orkestra/operation/http
+name: report_unhealthy
+spec:
+  method: POST
+  url: |
+    .globals.alert_webhook
+  body: |
+    {
+      repo: "\(.globals.owner)/\(.globals.repo)",
+      status: "unhealthy",
+      reason: (if task("get_repo_info").output.body.archived == true then "repository is archived" else "too many open issues" end),
+      open_issues: (task("get_open_issues").output.body // [] | length)
+    }
+
+# =========================
+# STEPS
+# =========================
+---
+kind: orkestra/step
+name: get_repo_info
+spec:
+  operation: get_repo_info
+
+---
+kind: orkestra/step
+name: get_open_issues
+spec:
+  operation: get_open_issues
+
+---
+kind: orkestra/step
+name: report_healthy
+spec:
+  operation: report_healthy
+
+---
+kind: orkestra/step
+name: report_unhealthy
+spec:
+  operation: report_unhealthy
+
+# =========================
+# TRANSITIONS
+# =========================
+
+# Check archived before fetching issues so we can short-circuit
+---
+kind: orkestra/transition
+name: t_archived
+spec:
+  from: get_repo_info
+  priority: 20
+  on: |
+    .input.body.archived == true
+  to: report_unhealthy
+
+---
+kind: orkestra/transition
+name: t_fetch_issues
+spec:
+  from: get_repo_info
+  priority: 10
+  on: |
+    .input.body.archived != true
+  to: get_open_issues
+
+---
+kind: orkestra/transition
+name: t_too_many_issues
+spec:
+  from: get_open_issues
+  priority: 10
+  on: |
+    (.input.body | length) >= .globals.issue_count_threshold
+  to: report_unhealthy
+
+---
+kind: orkestra/transition
+name: t_healthy
+spec:
+  from: get_open_issues
+  on: |
+    (.input.body | length) < .globals.issue_count_threshold
+  to: report_healthy

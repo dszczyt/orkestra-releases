@@ -1,0 +1,63 @@
+# Orkestra quickstart: PostgreSQL + server + worker from the published image.
+#
+#   docker compose -f deploy/compose.yaml up
+#
+# The server applies database migrations at startup (ORKESTRA_AUTO_MIGRATE).
+# Console and API: http://localhost:8080  (health: /healthz)
+#
+# Bootstrap the first user and an API key. `users create` only creates the
+# user; it reads the password from stdin when not on a terminal (and prompts
+# twice on a terminal). Migrations create an organization named "Default";
+# `keys create` needs the id of an organization:
+#
+#   docker compose -f deploy/compose.yaml exec server /orkestra users create you@example.com
+#   docker compose -f deploy/compose.yaml exec postgres psql -U orkestra -tAc \
+#     "SELECT id FROM organizations WHERE name = 'Default'"
+#   docker compose -f deploy/compose.yaml exec server /orkestra keys create <org-id>
+#
+# `keys create` prints the token once; send it as "Authorization: Bearer <token>" to /v1.
+#
+# The binary is /orkestra in the image (not on PATH). The image tag defaults to
+# the release this file was published with; pin another with ORKESTRA_VERSION=<tag>; change the port with SERVER_PORT.
+services:
+  postgres:
+    image: postgres:18
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: orkestra
+      POSTGRES_PASSWORD: orkestra
+      POSTGRES_DB: orkestra
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orkestra"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  server:
+    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.1}
+    command: ["serve"]
+    environment:
+      ORKESTRA_DATABASE_URL: postgres://orkestra:orkestra@postgres:5432/orkestra
+      ORKESTRA_AUTO_MIGRATE: "true"
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.1}
+    command: ["worker"]
+    restart: on-failure # retries if it starts before the server has applied migrations
+    environment:
+      ORKESTRA_DATABASE_URL: postgres://orkestra:orkestra@postgres:5432/orkestra
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_started
+
+volumes:
+  postgres_data:

@@ -1,0 +1,47 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+---
+kind: orkestra/test/mock/http
+name: mock_slack
+spec:
+  request:
+    method: POST
+    target: /services/T000/B000/XXXX
+  response:
+    code: 200
+    headers:
+      - content-type: text/plain
+    body: |
+      "ok"
+
+---
+kind: orkestra/test/mock/http
+name: mock_result
+spec:
+  request:
+    method: POST
+    target: /your-token-here
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"received": true}
+
+---
+kind: orkestra/test/workflow
+name: test_message_is_posted_to_slack
+spec:
+  input: |
+    {"text": "Deploy finished", "channel": "#ops"}
+  phases:
+    - name: post
+      mocks: [mock_slack, mock_result]
+      expectations:
+        - type: equal
+          expected: 200
+          actual: .steps.post_to_slack.status_code
+          failure: "Slack should answer 200"
+        - type: equal
+          expected: 200
+          actual: .steps.record_status.status_code
+          failure: "status should be recorded"

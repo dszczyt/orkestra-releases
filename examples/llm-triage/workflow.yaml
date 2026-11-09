@@ -1,0 +1,153 @@
+# Input: {"title": "App crashes on login", "body": "Stack trace: ..."}
+# Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec:
+  secret: llm
+  in: header
+  key_name: x-api-key
+
+---
+kind: orkestra/workflow
+name: llm_triage
+spec:
+  initial_step: classify
+  input: |
+    .
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  result_webhook: "https://webhook.site/your-token-here"
+
+---
+kind: orkestra/operation/http
+name: classify
+spec:
+  auth: llm_auth
+  method: POST
+  url: '"https://api.anthropic.com/v1/messages"'
+  headers: |
+    {"anthropic-version": ["2023-06-01"], "content-type": ["application/json"]}
+  body: |
+    {
+      model: "claude-sonnet-5-5",
+      max_tokens: 256,
+      messages: [{
+        role: "user",
+        content: "Classify this issue as exactly one word: bug, feature or question. Reply with the word only.\n\nTitle: \(.input.title)\n\n\(.input.body)"
+      }]
+    }
+
+---
+kind: orkestra/step
+name: classify
+spec:
+  operation: classify
+
+---
+kind: orkestra/transition
+name: is_bug
+spec:
+  from: classify
+  priority: 30
+  on: |
+    (((.input.body.content // [])[0].text // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "bug"
+  to: route_bug
+
+---
+kind: orkestra/transition
+name: is_feature
+spec:
+  from: classify
+  priority: 20
+  on: |
+    (((.input.body.content // [])[0].text // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "feature"
+  to: route_feature
+
+---
+kind: orkestra/transition
+name: is_question
+spec:
+  from: classify
+  priority: 10
+  on: |
+    true
+  to: route_question
+
+---
+kind: orkestra/operation/http
+name: route_bug
+spec:
+  method: POST
+  url: |
+    .globals.result_webhook
+  body: |
+    {"label": "bug", "title": task("classify").input.title}
+
+---
+kind: orkestra/step
+name: route_bug
+spec:
+  operation: route_bug
+
+---
+kind: orkestra/transition
+name: done_bug
+spec:
+  from: route_bug
+  status: completed
+
+---
+kind: orkestra/operation/http
+name: route_feature
+spec:
+  method: POST
+  url: |
+    .globals.result_webhook
+  body: |
+    {"label": "feature", "title": task("classify").input.title}
+
+---
+kind: orkestra/step
+name: route_feature
+spec:
+  operation: route_feature
+
+---
+kind: orkestra/transition
+name: done_feature
+spec:
+  from: route_feature
+  status: completed
+
+---
+kind: orkestra/operation/http
+name: route_question
+spec:
+  method: POST
+  url: |
+    .globals.result_webhook
+  body: |
+    {"label": "question", "title": task("classify").input.title}
+
+---
+kind: orkestra/step
+name: route_question
+spec:
+  operation: route_question
+
+---
+kind: orkestra/transition
+name: done_question
+spec:
+  from: route_question
+  status: completed
+

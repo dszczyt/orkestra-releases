@@ -1,0 +1,147 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+---
+kind: orkestra/test/mock/http
+name: mock_llm_bug
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"content":[{"type":"text","text":"bug"}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_feature
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"content":[{"type":"text","text":"feature"}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_question
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"content":[{"type":"text","text":"question"}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_error
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    # 200 on purpose: non-2xx fails the operation before routing. This covers a 2xx body without `content`.
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"error":{"type":"overloaded"}}
+
+---
+kind: orkestra/test/mock/http
+name: mock_result
+spec:
+  request:
+    method: POST
+    target: /your-token-here
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"ok": true}
+
+---
+kind: orkestra/test/workflow
+name: test_bug_branch
+spec:
+  input: |
+    {"title": "Some issue", "body": "Details"}
+  phases:
+    - name: triage
+      mocks: [mock_llm_bug, mock_result]
+      expectations:
+        - type: equal
+          expected: 200
+          actual: .steps.route_bug.status_code
+          failure: "bug branch should run"
+        - type: exactly
+          expected: null
+          actual: .steps.route_feature
+          failure: "other branches must not run"
+
+---
+kind: orkestra/test/workflow
+name: test_feature_branch
+spec:
+  input: |
+    {"title": "Some issue", "body": "Details"}
+  phases:
+    - name: triage
+      mocks: [mock_llm_feature, mock_result]
+      expectations:
+        - type: equal
+          expected: 200
+          actual: .steps.route_feature.status_code
+          failure: "feature branch should run"
+        - type: exactly
+          expected: null
+          actual: .steps.route_bug
+          failure: "other branches must not run"
+
+---
+kind: orkestra/test/workflow
+name: test_question_branch
+spec:
+  input: |
+    {"title": "Some issue", "body": "Details"}
+  phases:
+    - name: triage
+      mocks: [mock_llm_question, mock_result]
+      expectations:
+        - type: equal
+          expected: 200
+          actual: .steps.route_question.status_code
+          failure: "question branch should run"
+        - type: exactly
+          expected: null
+          actual: .steps.route_bug
+          failure: "other branches must not run"
+
+---
+kind: orkestra/test/workflow
+name: test_error_body_takes_default_branch
+spec:
+  input: |
+    {"title": "Some issue", "body": "Details"}
+  phases:
+    - name: triage
+      mocks: [mock_llm_error, mock_result]
+      expectations:
+        - type: equal
+          expected: 200
+          actual: .steps.route_question.status_code
+          failure: "default branch should run on an error body"
+        - type: exactly
+          expected: null
+          actual: .steps.route_bug
+          failure: "bug branch must not run"
