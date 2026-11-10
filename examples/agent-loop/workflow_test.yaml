@@ -1,0 +1,118 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+# Every HTTP call is mocked: no network, no API key needed.
+# `responses:` answers call N with entry N; the last entry repeats.
+---
+kind: orkestra/test/mock/http
+name: mock_llm_conversation
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"text","text":"Looking up Lyon."},{"type":"tool_use","id":"toolu_1","name":"geocode","input":{"name":"Lyon"}}]}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_2","name":"forecast","input":{"latitude":45.75,"longitude":4.85}}]}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"end_turn","content":[{"type":"text","text":"Yes: rain is likely this afternoon in Lyon (80%)."}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_tool_forever
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_x","name":"geocode","input":{"name":"Lyon"}}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_geocode
+spec:
+  request:
+    method: GET
+    target: /v1/search
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"results":[{"name":"Lyon","latitude":45.75,"longitude":4.85}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_forecast
+spec:
+  request:
+    method: GET
+    target: /v1/forecast
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"hourly":{"precipitation_probability":[10,80],"temperature_2m":[12,14]}}
+
+---
+kind: orkestra/test/workflow
+name: test_tool_loop_answers
+spec:
+  input: |
+    {"question": "Do I need an umbrella in Lyon today?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm_conversation, mock_geocode, mock_forecast]
+      expectations:
+        - type: equal
+          expected: "Yes: rain is likely this afternoon in Lyon (80%)."
+          actual: .steps.think.body.content[0].text
+          failure: "the run should end on Claude's answer"
+        - type: equal
+          expected: 3
+          actual: '[.history[] | select(.step == "think")] | length'
+          failure: "think should run once per turn"
+        - type: equal
+          expected: "toolu_1"
+          actual: '[.history[] | select(.step == "think")][1].input.messages[-1].content[0].tool_use_id'
+          failure: "the tool result must answer the tool call that asked for it"
+        - type: equal
+          expected: 45.75
+          actual: '[.history[] | select(.step == "forecast")][0].input.call.input.latitude'
+          failure: "forecast should get the coordinates Claude passed"
+        - type: equal
+          expected: ["user", "assistant", "user", "assistant", "user"]
+          actual: '[.history[] | select(.step == "think")][2].input.messages | map(.role)'
+          failure: "the conversation should grow by one exchange per tool call"
+
+---
+kind: orkestra/test/workflow
+name: test_turn_budget_stops_the_loop
+spec:
+  input: |
+    {"question": "Do I need an umbrella in Lyon today?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm_tool_forever, mock_geocode]
+      expectations:
+        - type: equal
+          expected: 6
+          actual: '[.history[] | select(.step == "think")] | length'
+          failure: "think should stop at max_turns (6)"
+        - type: equal
+          expected: 5
+          actual: '[.history[] | select(.step == "geocode")] | length'
+          failure: "no tool should run after the last allowed turn"
