@@ -27,8 +27,11 @@ Tool HTTP errors do not fail the run (`disable_http_failure: true`): they go bac
 
 ## Run
 
+Download the workflow, then run it from the folder that holds it:
+
 ```
-ORKESTRA_LLM_API_KEY=sk-ant-... orkestra run examples/reference/agent-loop/workflow.yaml \
+curl -fsSLO https://raw.githubusercontent.com/dszczyt/orkestra-releases/main/examples/agent-loop/workflow.yaml
+ORKESTRA_LLM_API_KEY=sk-ant-... orkestra run workflow.yaml \
   --context /tmp/agent.json --input '{"question": "Do I need an umbrella in Lyon today?"}'
 ```
 
@@ -40,7 +43,7 @@ The answer is in the last `think` output, at `body.content[0].text`.
 
 ```
 claude mcp add weather -e ORKESTRA_LLM_API_KEY=sk-ant-... -- \
-  orkestra mcp serve /path/to/examples/reference/agent-loop/workflow.yaml
+  orkestra mcp serve /absolute/path/to/workflow.yaml
 ```
 
 The tool is named `weather_agent`, after the workflow. It takes `{"question": "..."}` and returns `{"status", "step", "output"}` for the last step.
