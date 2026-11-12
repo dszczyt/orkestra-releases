@@ -39,14 +39,15 @@ The answer is in the last `think` output, at `body.content[0].text`.
 
 `ORKESTRA_LLM_API_KEY` is your Anthropic API key. Environment variables in `orkestra/secret` are expanded only when the CLI loads a LOCAL workflow file, so download the file before running it.
 
-## Use it as a tool from another agent (MCP)
+## Run it from another agent (MCP)
+
+Register Orkestra once; it serves every workflow, so there is nothing to set up per workflow:
 
 ```
-claude mcp add weather -e ORKESTRA_LLM_API_KEY=sk-ant-... -- \
-  orkestra mcp serve /absolute/path/to/workflow.yaml
+claude mcp add orkestra -e ORKESTRA_LLM_API_KEY=sk-ant-... -- orkestra mcp serve
 ```
 
-The tool is named `weather_agent`, after the workflow. It takes `{"question": "..."}` and returns `{"status", "step", "output"}` for the last step.
+The agent calls `orkestra_run` with `{"workflow": "/absolute/path/to/workflow.yaml", "input": {"question": "..."}}` and gets `{"status", "run_id", "step", "output"}` for the last step. Add `"context": "/absolute/path/to/agent.json"` to keep the run, then read each turn with `orkestra_get_run` and `orkestra_get_task`.
 
 ## Test
 

@@ -6,7 +6,7 @@
 
 Deterministic workflow orchestration on PostgreSQL alone: declarative YAML, every run pinned to a commit and replayable, started from the CLI or the HTTP API, on a cron schedule, or by firing a trigger. Self-hosted, MIT licensed.
 
-Status: v0.2.0-alpha.3 (prerelease). Expect rough edges and breaking changes before 1.0.
+Status: v0.2.0-alpha.4 (prerelease). Expect rough edges and breaking changes before 1.0.
 
 ---
 
@@ -17,7 +17,7 @@ Status: v0.2.0-alpha.3 (prerelease). Expect rough edges and breaking changes bef
 brew install dszczyt/tap/orkestra
 
 # Container image (server and worker), tagged by release, for example
-docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.3
+docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.4
 ```
 
 Prebuilt binaries for Linux, macOS and Windows are on the [releases page](https://github.com/dszczyt/orkestra-releases/releases). Download the archive for your platform, extract it and put `orkestra` on your `PATH`.
@@ -140,7 +140,7 @@ ORKESTRA_LLM_API_KEY=<your-key> orkestra --context ctx.json run workflow.yaml \
 - **Transition** (`orkestra/transition`): moves execution from one step to another. `on` is a JQ boolean; with several matches the highest `priority` wins; no `on` is a catch-all.
 - **ConfigMap** (`orkestra/configmap`): key-value settings available as `.globals.<key>`. Override one key with `--set globals.key=value` or replace a whole map with `--configmap name=file.yaml`.
 - **Secret and auth** (`orkestra/secret`, `orkestra/auth/*`): credentials for HTTP operations (bearer, basic, API key, OAuth2).
-- **Context**: where a run's state is stored. `--context ctx.json` uses one file; `--context ./ctx/` (an existing directory) uses one file per task.
+- **Context**: where a run's state is stored. `--context ctx.json` keeps the whole run in one file (JSON or YAML). Directory contexts are not supported yet.
 
 ```yaml
 ---
@@ -172,7 +172,7 @@ spec:
 
 ## CLI reference
 
-Global flags: `--context <path>` (context file or directory), `--config <file>` (default `$HOME/.orkestra.yaml`). Put them before the subcommand. Run `orkestra <command> --help` for the full text.
+Global flags: `--context <path>` (context file), `--config <file>` (default `$HOME/.orkestra.yaml`). Put them before the subcommand. Run `orkestra <command> --help` for the full text.
 
 | Command | Purpose |
 |---|---|
@@ -184,6 +184,7 @@ Global flags: `--context <path>` (context file or directory), `--config <file>` 
 | `orkestra migrate` | Apply pending database migrations |
 | `orkestra users create <email>` | Create a user account (bootstrap) |
 | `orkestra keys create\|list\|revoke` | Manage API keys |
+| `orkestra mcp serve` | Serve Orkestra as an MCP server over stdio: run any workflow, read stored runs |
 
 Also available: `orkestra describe <workflow>` (structure, `--graph` for an ASCII graph), `orkestra context` (inspect a run's context) and `orkestra auth login <workflow-file> <auth-resource-name>` (OAuth2 authorization code flow in the browser).
 
@@ -191,7 +192,7 @@ Also available: `orkestra describe <workflow>` (structure, `--graph` for an ASCI
 
 Flags: `--input <json>`, `--input-file <path>`, `--resource <path>` (repeatable), `--resume-from <step>`, `--restart`, `--initial-step <step>` (`-i`), `--stop-at <step>`, `--step` (`-s`, pause after each step), `--dry-run`, `--mock-output <step=json|step=@file>` (implies `--dry-run`), `--timeout <duration>`, `--set <name.key=value>`, `--configmap <name=path>`, `--storage <file|folder|postgres>`, `--db-url <dsn>`, `--output <text|json>`, `--verbose` (`-v`), `--quiet` (`-q`).
 
-Input is taken from `--input`, then `--input-file`, then piped stdin. The storage backend is chosen from `--context` (an existing directory selects `folder`, anything else `file`) unless `--storage` is set.
+Input is taken from `--input`, then `--input-file`, then piped stdin. With `--context`, the run is stored in that file unless `--storage` selects another backend.
 
 ```bash
 orkestra --context ctx.json run workflow.yaml \
@@ -223,6 +224,33 @@ Both need `ORKESTRA_DATABASE_URL`.
 - `keys create <org-id> [--owner <user-id>]`: creates an organization-wide key, or a personal access token with `--owner`. The token is printed once.
 - `keys list <org-id>` and `keys revoke <key-id>`.
 
+### mcp serve
+
+Register Orkestra once in the agent client. The client starts it over stdio, so no server runs, and the agent names the workflow and the context file at each call:
+
+- `orkestra_run`: run a workflow (file path or https URL) with an input. With `context`, the run is kept in that context file; `restart` and `resume_from` work as in `orkestra run`.
+- `orkestra_get_run`: the run stored in a context file and its tasks (step, status, timing, retries, error).
+- `orkestra_get_task`: one task with its input and output.
+
+Local workflow and context files must be under `--root`, which defaults to the directory where the client starts Orkestra (symlinks are resolved). https workflows are allowed. A context file must end in `.json`, `.yaml` or `.yml`, and an existing file is replaced only if it already holds an Orkestra run. Secret values of the workflow are redacted from every result.
+
+```bash
+claude mcp add orkestra -- orkestra mcp serve --root /path/to/project
+```
+
+A step can keep its data away from some agents, for example health data that only a local LLM may read:
+
+```yaml
+kind: orkestra/step
+name: diagnose
+metadata:
+  access: [local-llm]
+spec:
+  operation: diagnose
+```
+
+Register each agent client with its own key, for example `orkestra mcp serve --key local-llm` for the local model and no key for a cloud assistant. A client whose key is not listed never gets that step's input, output or error text, nor the input or error text of any later task of the run, since restricted data flows into them. Resuming a context requires the workflow of its stored run. Task data is withheld when that workflow cannot be loaded, or is a remote URL whose rules may have changed since the run. This filters what goes through MCP only: an agent that can read the context file on disk is not stopped.
+
 ---
 
 ## What is new in v0.2
@@ -230,6 +258,7 @@ Both need `ORKESTRA_DATABASE_URL`.
 Compared with v0.1.0 (2026-05-06). See the [release notes](https://github.com/dszczyt/orkestra-releases/releases) for details.
 
 - Web console: runs, triggers, task inspector, step input and output.
+- MCP server: `orkestra mcp serve` lets an agent run any workflow and read its stored runs over stdio, with no server to deploy. Per-step access keys keep sensitive step data away from agents that are not authorized to read it.
 - Trigger resources: the DSL and adapter packages cover 20 kinds (cdc, cli, cron, email, form, git, graphql, grpc, http, log, mongodb, mqtt, otel, phone, queue, slack, sms, storage, webhook, websocket). In the server only `cron` runs on its own; the push kinds (http, webhook, git, slack, grpc, form, phone, sms, otel, log, cli) can be fired with `POST /v1/triggers/{name}/fire`. The eight kinds that need an external provider (cdc, email, graphql, mongodb, mqtt, queue, storage, websocket) are not wired into the server yet and cannot be fired.
 - Multi-organization auth: users, sessions, organizations, memberships, invites, org-shared API keys and personal access tokens.
 - Distributed worker with heartbeat and a stale-task reaper.
