@@ -2,11 +2,11 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/dszczyt/orkestra-releases?label=release)](https://github.com/dszczyt/orkestra-releases/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/dszczyt/orkestra-releases/blob/main/LICENSE)
-[![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)](https://go.dev)
+[![Go 1.27+](https://img.shields.io/badge/go-1.27%2B-00ADD8)](https://go.dev)
 
 Deterministic workflow orchestration on PostgreSQL alone: declarative YAML, every run pinned to a commit and replayable, started from the CLI or the HTTP API, on a cron schedule, or by firing a trigger. Self-hosted, MIT licensed.
 
-Status: v0.2.0-alpha.5 (prerelease). Expect rough edges and breaking changes before 1.0.
+Status: v0.2.0-alpha.6 (prerelease). Expect rough edges and breaking changes before 1.0.
 
 ---
 
@@ -17,7 +17,7 @@ Status: v0.2.0-alpha.5 (prerelease). Expect rough edges and breaking changes bef
 brew install dszczyt/tap/orkestra
 
 # Container image (server and worker), tagged by release, for example
-docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.5
+docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.6
 ```
 
 Prebuilt binaries for Linux, macOS and Windows are on the [releases page](https://github.com/dszczyt/orkestra-releases/releases). Download the archive for your platform, extract it and put `orkestra` on your `PATH`.
