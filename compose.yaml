@@ -36,7 +36,7 @@ services:
       retries: 20
 
   server:
-    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.4}
+    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.5}
     command: ["serve"]
     environment:
       ORKESTRA_DATABASE_URL: postgres://orkestra:orkestra@postgres:5432/orkestra
@@ -48,7 +48,7 @@ services:
         condition: service_healthy
 
   worker:
-    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.4}
+    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.5}
     command: ["worker"]
     restart: on-failure # retries if it starts before the server has applied migrations
     environment:
