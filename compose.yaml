@@ -22,7 +22,8 @@
 services:
   postgres:
     image: postgres:18
-    command: ["postgres", "-c", "wal_level=logical"]
+    # Only for ORKESTRA_EVENT_MODE=wal on the worker:
+    # command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_USER: orkestra
       POSTGRES_PASSWORD: orkestra
@@ -36,7 +37,7 @@ services:
       retries: 20
 
   server:
-    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.6}
+    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.7}
     command: ["serve"]
     environment:
       ORKESTRA_DATABASE_URL: postgres://orkestra:orkestra@postgres:5432/orkestra
@@ -48,11 +49,16 @@ services:
         condition: service_healthy
 
   worker:
-    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.6}
+    image: ghcr.io/dszczyt/orkestra:${ORKESTRA_VERSION:-v0.2.0-alpha.7}
     command: ["worker"]
     restart: on-failure # retries if it starts before the server has applied migrations
     environment:
       ORKESTRA_DATABASE_URL: postgres://orkestra:orkestra@postgres:5432/orkestra
+      # notify (LISTEN/NOTIFY, default) or wal (needs wal_level=logical above)
+      ORKESTRA_EVENT_MODE: ${ORKESTRA_EVENT_MODE:-notify}
+      # Off by default: workflows cannot call loopback, private or metadata
+      # addresses. Set to 1 to let them call services on this network.
+      ORKESTRA_ALLOW_PRIVATE_HTTP: ${ORKESTRA_ALLOW_PRIVATE_HTTP:-}
     depends_on:
       postgres:
         condition: service_healthy

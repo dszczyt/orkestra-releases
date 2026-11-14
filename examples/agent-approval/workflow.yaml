@@ -1,0 +1,61 @@
+# Input: {"request": "Tell the customer in order A-1042 that their parcel shipped."}
+# Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
+#
+# An agent with a tool that has a side effect: sending an email. The tool says
+# `approval: required`, so a person approves each call before it runs.
+#
+#   orkestra run workflow.yaml --context run.json --input '{"request": "..."}'
+#
+# The run stops at the approval (still `running`). The pending approval lists
+# the call: the tool, its arguments and the key to answer with. Answer it, then
+# run the same command again to continue:
+#
+#   orkestra signal --context run.json --name approval --key <tool call id> \
+#     --payload '{"decision": "approve", "reason": "looks right"}'
+#
+# A decision other than "approve", or no answer within the timeout, is a denial:
+# the model reads "denied: <reason>" as the tool result and can react.
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec: {secret: llm, in: header, key_name: x-api-key}
+
+---
+kind: orkestra/workflow
+name: mail_agent
+spec:
+  description: 'Sends a customer email after a person approves it. Input: {"request": "..."}'
+  initial_step: mailer
+  input: .
+
+---
+kind: orkestra/agent
+name: mailer
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 1024
+  system: You write short customer emails with the send_email tool. If a call is denied, say so and do not retry.
+  prompt: .input.request
+  budget: {turns: 4}
+  tools:
+    send_email:
+      description: Send an email to a customer.
+      input_schema: {type: object, properties: {to: {type: string}, subject: {type: string}, body: {type: string}}, required: [to, subject, body]}
+      operation: send_email
+      approval: required
+      approval_timeout: 24h
+
+---
+kind: orkestra/operation/http
+name: send_email
+spec:
+  method: POST
+  url: '"https://mail.example.com/v1/send"'
+  body: .input

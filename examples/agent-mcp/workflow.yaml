@@ -1,0 +1,54 @@
+# Input: {"question": "How do I rotate an API key?"}
+# Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
+#
+# An agent whose tool lives on an MCP server. The url below is a placeholder:
+# point it at your server and run `orkestra mcp pin workflow.yaml`, which lists
+# the server's tools once and writes `protocol` and `tools` into the server
+# resource. At run time Orkestra never lists tools: only what is pinned exists.
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec: {secret: llm, in: header, key_name: x-api-key}
+
+---
+kind: orkestra/workflow
+name: docs_agent
+spec:
+  description: 'Answers a question from the documentation, searched through an MCP server. Input: {"question": "..."}'
+  initial_step: docs
+  input: .
+
+---
+kind: orkestra/mcp/server
+name: docs
+spec:
+  transport: http
+  url: https://docs-mcp.example.com/mcp
+  protocol: "2026-07-28"
+  tools:
+    search_docs:
+      description: Search the documentation and return the best matching passages.
+      input_schema: {type: object, properties: {query: {type: string}}, required: [query]}
+
+---
+kind: orkestra/agent
+name: docs
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 1024
+  system: You answer questions from the documentation. Search it before you answer, and say when it does not cover the question.
+  prompt: .input.question
+  budget: {turns: 5, cost_usd: 0.05, wall_clock: 60s}
+  tools:
+    search_docs:
+      mcp: docs
+      # Every MCP tool says whether a person approves each call: `none` runs it
+      # at once, `required` waits for an approval (see agent-approval).
+      approval: none

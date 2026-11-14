@@ -1,0 +1,84 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+# Locally the branches run one at a time, in declaration order.
+---
+kind: orkestra/test/mock/http
+name: mock_profile
+spec:
+  request:
+    method: GET
+    target: /profile
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"name": "Jane"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_orders
+spec:
+  request:
+    method: GET
+    target: /orders
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"count": 3}
+
+---
+kind: orkestra/test/mock/http
+name: mock_orders_down
+spec:
+  request:
+    method: GET
+    target: /orders
+  response:
+    code: 503
+    headers:
+      - content-type: text/plain
+    body: |
+      "unavailable"
+
+---
+kind: orkestra/test/workflow
+name: test_branches_are_joined_by_name
+spec:
+  input: '{"user_id": "u-42"}'
+  phases:
+    - name: enrich
+      mocks: [mock_profile, mock_orders]
+      expectations:
+        - type: equal
+          expected: {name: Jane, orders: 3, failed: []}
+          actual: .steps.merge
+        - type: equal
+          expected: ["orders", "profile"]
+          actual: '.steps.enrich | keys'
+          failure: "the step's output is an object keyed by branch name"
+        - type: equal
+          expected: [profile, orders]
+          actual: '[.tasks[] | select(.parent_id != null) | .branch]'
+          failure: "one child task per branch"
+
+---
+kind: orkestra/test/workflow
+name: test_a_failed_branch_keeps_its_error
+spec:
+  input: '{"user_id": "u-42"}'
+  phases:
+    - name: enrich
+      mocks: [mock_profile, mock_orders_down]
+      expectations:
+        - type: equal
+          expected: {name: Jane, orders: null, failed: [orders]}
+          actual: .steps.merge
+          failure: "under on_failure continue, the failed branch's slot holds its error"
+        - type: equal
+          expected: http
+          actual: .steps.enrich.orders._error.type
+        - type: equal
+          expected: "completed"
+          actual: .run.status

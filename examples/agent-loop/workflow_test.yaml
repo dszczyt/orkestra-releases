@@ -68,6 +68,41 @@ spec:
       {"hourly":{"precipitation_probability":[10,80],"temperature_2m":[12,14]}}
 
 ---
+# The model asks for a tool the agent does not have, then answers.
+kind: orkestra/test/mock/http
+name: mock_llm_unknown_tool
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_9","name":"teleport","input":{"to":"Lyon"}}]}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"end_turn","content":[{"type":"text","text":"I cannot do that."}]}
+
+---
+# The weather service is down: the HTTP error goes back to the model.
+kind: orkestra/test/mock/http
+name: mock_geocode_down
+spec:
+  request:
+    method: GET
+    target: /v1/search
+  response:
+    code: 503
+    headers:
+      - content-type: application/json
+    body: |
+      {"error": "unavailable"}
+
+---
 kind: orkestra/test/workflow
 name: test_tool_loop_answers
 spec:
@@ -79,28 +114,28 @@ spec:
       expectations:
         - type: equal
           expected: "Yes: rain is likely this afternoon in Lyon (80%)."
-          actual: .steps.think.body.content[0].text
-          failure: "the run should end on Claude's answer"
+          actual: '.steps["weather.think"].text'
+          failure: "the run should end on the model's answer"
         - type: equal
           expected: 3
-          actual: '[.history[] | select(.step == "think")] | length'
-          failure: "think should run once per turn"
+          actual: '[.history[] | select(.step == "weather.think")] | length'
+          failure: "the agent thinks once per turn"
         - type: equal
           expected: "toolu_1"
-          actual: '[.history[] | select(.step == "think")][1].input.messages[-1].content[0].tool_use_id'
+          actual: '.conversations.weather[2].tool_results[0].id'
           failure: "the tool result must answer the tool call that asked for it"
         - type: equal
           expected: 45.75
-          actual: '[.history[] | select(.step == "forecast")][0].input.call.input.latitude'
-          failure: "forecast should get the coordinates Claude passed"
+          actual: '[.tasks[] | select(.step == "tool.forecast")][0].input.latitude'
+          failure: "the tool step gets the arguments the model passed, as its input"
         - type: equal
-          expected: ["user", "assistant", "user", "assistant", "user"]
-          actual: '[.history[] | select(.step == "think")][2].input.messages | map(.role)'
-          failure: "the conversation should grow by one exchange per tool call"
+          expected: ["user", "assistant", "user", "assistant", "user", "assistant"]
+          actual: '.conversations.weather | map(.role)'
+          failure: "the conversation grows by one exchange per tool call, outside any task input"
 
 ---
 kind: orkestra/test/workflow
-name: test_turn_budget_stops_the_loop
+name: test_budget_stops_a_model_that_never_stops
 spec:
   input: |
     {"question": "Do I need an umbrella in Lyon today?"}
@@ -110,9 +145,67 @@ spec:
       expectations:
         - type: equal
           expected: 6
-          actual: '[.history[] | select(.step == "think")] | length'
-          failure: "think should stop at max_turns (6)"
+          actual: '[.history[] | select(.step == "weather.think" and .status == "completed")] | length'
+          failure: "the budget allows 6 turns"
         - type: equal
-          expected: 5
-          actual: '[.history[] | select(.step == "geocode")] | length'
-          failure: "no tool should run after the last allowed turn"
+          expected: "budget.turns"
+          actual: '[.history[] | select(.status == "failed")][0].output._error.name'
+          failure: "the task after the last allowed turn is refused by the budget, before it runs"
+        - type: equal
+          expected: "weather.think"
+          actual: '[.history[] | select(.status == "failed")][0].step'
+          failure: "the model ignored tool_choice none on the last turn: its tool calls come back refused, and the next model call is the refused task"
+        - type: equal
+          expected: "budget.turns"
+          actual: '[.tasks[] | select(.step == "weather.calls" and .status == "failed")][0].output._error.name'
+          failure: "a tool call of a spent agent is refused by the budget before its child run starts"
+        - type: equal
+          expected: "I could not finish within my turn budget."
+          actual: .steps.gave_up.text
+          failure: "on_exhausted sends the run to gave_up"
+
+---
+kind: orkestra/test/workflow
+name: test_unknown_tool_goes_back_to_the_model
+spec:
+  input: |
+    {"question": "Teleport me to Lyon."}
+  phases:
+    - name: agent
+      mocks: [mock_llm_unknown_tool]
+      expectations:
+        - type: equal
+          expected: true
+          actual: '.conversations.weather[2].tool_results[0].is_error'
+          failure: "an unknown tool is an error result, not the end of the run"
+        - type: equal
+          expected: "unknown tool: teleport"
+          actual: '.conversations.weather[2].tool_results[0].content'
+          failure: "the model is told what went wrong"
+        - type: equal
+          expected: "I cannot do that."
+          actual: '.steps["weather.think"].text'
+          failure: "the model can react and answer"
+        - type: equal
+          expected: false
+          actual: 'any(.tasks[]; .step | startswith("tool."))'
+          failure: "no tool ran"
+
+---
+kind: orkestra/test/workflow
+name: test_failed_tool_call_goes_back_to_the_model
+spec:
+  input: |
+    {"question": "Do I need an umbrella in Lyon today?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm_conversation, mock_geocode_down, mock_forecast]
+      expectations:
+        - type: equal
+          expected: true
+          actual: '.conversations.weather[2].tool_results[0].is_error'
+          failure: "an HTTP error from the tool is an error result for the model"
+        - type: equal
+          expected: 3
+          actual: '[.history[] | select(.step == "weather.think")] | length'
+          failure: "the loop goes on"

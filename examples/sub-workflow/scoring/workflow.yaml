@@ -1,0 +1,46 @@
+# A child workflow: scores a lead. Its result is the output of its last step.
+kind: orkestra/workflow
+name: lead_scoring
+spec:
+  initial_step: fetch_score
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  scoring_url: "https://scoring.example.com/score"
+
+---
+kind: orkestra/operation/http
+name: fetch_score
+spec:
+  method: POST
+  url: |
+    .globals.scoring_url
+  body: |
+    {email: .input.lead.email}
+
+---
+kind: orkestra/operation/pass
+name: classify
+spec:
+  output: '{score: .input.body.score, tier: (if .input.body.score >= 50 then "hot" else "cold" end)}'
+
+---
+kind: orkestra/step
+name: fetch_score
+spec:
+  operation: fetch_score
+
+---
+kind: orkestra/step
+name: classify
+spec:
+  operation: classify
+
+---
+kind: orkestra/transition
+name: scored
+spec:
+  from: fetch_score
+  to: classify

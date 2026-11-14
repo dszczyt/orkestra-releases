@@ -1,0 +1,15 @@
+# Recorded by `orkestra test --record`. Request headers are never written; bodies are redacted.
+version: 1
+tests:
+  test_recorded_conversation:
+    chat:
+      - code: 200
+        headers:
+          - content-type: application/json
+        body: '{"model":"claude-sonnet-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"Paris."}],"usage":{"input_tokens":20,"cache_creation_input_tokens":600,"cache_read_input_tokens":0,"output_tokens":3}}'
+        request_sha256: 212af4bab3c85a104418217cbb676a1885ed47b1c0c8eb70ca61b6d37bd24713
+      - code: 200
+        headers:
+          - content-type: application/json
+        body: '{"model":"claude-sonnet-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"Paris."}],"usage":{"input_tokens":14,"cache_creation_input_tokens":0,"cache_read_input_tokens":600,"output_tokens":6}}'
+        request_sha256: 95c9106b00bb391faaded49f7f0da6ee853d564c72b970d34e6588642fd0a487

@@ -1,0 +1,146 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+---
+kind: orkestra/test/mock/http
+name: mock_stock
+spec:
+  request:
+    method: POST
+    target: /reservations
+  response:
+    code: 201
+    headers:
+      - content-type: application/json
+    body: |
+      {"reservation_id": "R-1"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_release
+spec:
+  request:
+    method: POST
+    target: /releases
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"released": true}
+
+---
+kind: orkestra/test/mock/http
+name: mock_charge
+spec:
+  request:
+    method: POST
+    target: /charges
+  response:
+    code: 201
+    headers:
+      - content-type: application/json
+    body: |
+      {"charge_id": "C-9"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_refund
+spec:
+  request:
+    method: POST
+    target: /refunds
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"refunded": true}
+
+---
+kind: orkestra/test/mock/http
+name: mock_refund_refused
+spec:
+  request:
+    method: POST
+    target: /refunds
+  response:
+    code: 409
+    headers:
+      - content-type: application/json
+    body: |
+      {"error": "already settled"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_shipping_down
+spec:
+  request:
+    method: POST
+    target: /shipments
+  response:
+    code: 500
+    headers:
+      - content-type: text/plain
+    body: |
+      "down"
+
+---
+kind: orkestra/test/mock/http
+name: mock_chat
+spec:
+  request:
+    method: POST
+    target: /messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"ok": true}
+
+---
+kind: orkestra/test/workflow
+name: test_failed_shipment_is_undone_in_reverse_order
+spec:
+  input: '{"order_id": "A-1042", "amount": 120}'
+  phases:
+    - name: book
+      mocks: [mock_stock, mock_charge, mock_shipping_down, mock_refund, mock_release, mock_chat]
+      expectations:
+        - type: equal
+          expected: ["refund_card", "release_stock"]
+          actual: '[.tasks[] | select(.compensates != null) | .step]'
+          failure: "the newest completed work is undone first"
+        - type: equal
+          expected: {charge: C-9}
+          actual: '[.tasks[] | select(.step == "refund_card")][0].input.output.body | {charge: .charge_id}'
+          failure: "a compensation gets the output of the task it undoes"
+        - type: equal
+          expected: book_shipment
+          actual: '[.history[] | select(.step == "notify_team")][0].input.failed_task.step'
+        - type: equal
+          expected: "failed"
+          actual: .run.status
+        - type: equal
+          expected: []
+          actual: .run.uncompensated
+
+---
+kind: orkestra/test/workflow
+name: test_refused_refund_stops_and_lists_the_rest
+spec:
+  input: '{"order_id": "A-1042", "amount": 120}'
+  phases:
+    - name: book
+      mocks: [mock_stock, mock_charge, mock_shipping_down, mock_refund_refused, mock_chat]
+      expectations:
+        - type: equal
+          expected: ["charge_card", "reserve_stock"]
+          actual: '.run.uncompensated as $ids | [$ids[] as $id | .tasks[] | select(.id == $id) | .step]'
+          failure: "a failed compensation stops compensating and lists what is left"
+        - type: equal
+          expected: refund_card
+          actual: '[.history[] | select(.step == "notify_team")][0].input.failed_task.step'
+          failure: "on_failure gets the failed compensation"
+        - type: equal
+          expected: "failed"
+          actual: .run.status

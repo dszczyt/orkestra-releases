@@ -1,0 +1,76 @@
+# Input: {"cities": ["Paris", "Lyon", "Nice"]}
+# Fetches a forecast per city with a map step, two at a time, then builds a
+# report from the joined forecasts. One failed city fails the step with
+# _error.type branch, and a failure transition reports which one.
+kind: orkestra/workflow
+name: city_forecasts
+spec:
+  initial_step: forecasts
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  weather_url: "https://weather.example.com/forecast"
+
+---
+kind: orkestra/operation/http
+name: get_forecast
+spec:
+  method: GET
+  url: |
+    .globals.weather_url + "?city=" + .input.city
+
+---
+kind: orkestra/operation/pass
+name: build_report
+spec:
+  output: '{cities: [.input[].body.city], max_temp: ([.input[].body.temp] | max)}'
+
+---
+kind: orkestra/operation/pass
+name: report_failure
+spec:
+  output: '{failed_item: (.input._error.branch | tonumber), cause: .input._error.cause.type, status: .input._error.cause.status_code}'
+
+---
+# One child task per city. The step's output is the array of the children's
+# outputs, in item order.
+kind: orkestra/step
+name: forecasts
+spec:
+  operation: get_forecast
+  map:
+    items: .input.cities
+    input: '{city: .item}'
+    concurrency: 2
+
+---
+kind: orkestra/step
+name: report
+spec:
+  operation: build_report
+
+---
+kind: orkestra/step
+name: report_failure
+spec:
+  operation: report_failure
+
+---
+kind: orkestra/transition
+name: forecasts_done
+spec:
+  from: forecasts
+  to: report
+
+---
+# on_failure fail (the default): the first failed city cancels the cities
+# not started yet, and the step fails with _error.type branch.
+kind: orkestra/transition
+name: a_city_failed
+spec:
+  from: forecasts
+  status: failed
+  on: .input._error.type == "branch"
+  to: report_failure

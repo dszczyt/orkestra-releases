@@ -1,6 +1,8 @@
 # LLM triage
 
-Asks Claude (model `claude-sonnet-5-5`) to classify an issue as `bug`, `feature` or `question`, then routes to a step that posts the label to `result_webhook`. Anything that is not clearly a bug or a feature goes to `question`.
+Asks Claude (model `claude-sonnet-5-5`) to classify an issue as `bug`, `feature` or `question`, then routes to a step that posts the label to `result_webhook`. Anything that is not clearly a bug or a feature goes to `question`, and so does a call the model refuses (`_error.type` is `llm.refusal`).
+
+The model call is an `orkestra/operation/llm`. Its output has `text`, `stop_reason`, `usage` (tokens), `cost_usd` and `request_sha256`, which the transitions read as `.input.text`. With the Postgres store each call also writes a `task_usage` row. The step retries HTTP 429, 5xx and 529 up to 3 attempts.
 
 ## Run
 

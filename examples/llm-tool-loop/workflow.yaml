@@ -1,0 +1,153 @@
+# Input: {"question": "Do I need an umbrella in Lyon today?"}
+# Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec:
+  secret: llm
+  in: header
+  key_name: x-api-key
+
+---
+kind: orkestra/workflow
+name: llm_tool_loop
+spec:
+  initial_step: think
+  input: |
+    .
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  weather_url: "https://weather.example.test"
+  notify_webhook: "https://notify.example.test/notify"
+
+---
+# The model is offered exactly the tools listed on the operation. This one is
+# routed to the run_lookup step below; nothing else can be called.
+kind: orkestra/tool
+name: lookup
+spec:
+  description: Look up the current weather for a city.
+  input_schema:
+    type: object
+    properties:
+      city: {type: string}
+    required: [city]
+
+---
+# Every task of these steps counts against the budget. After 3 model calls the
+# next `think` task is refused before it runs, with _error {type: limit, name:
+# budget.turns}, and on_exhausted sends the run to give_up. `orkestra validate`
+# refuses this workflow without the budget: think -> run_lookup -> think is a
+# loop that calls a model.
+kind: orkestra/budget
+name: agent
+spec:
+  steps: [think]
+  turns: 3
+  on_exhausted: give_up
+
+---
+kind: orkestra/operation/llm
+name: think
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 512
+  system: You answer weather questions. Use the lookup tool for the weather; never guess it. Answer in one sentence.
+  conversation: chat
+  tools: [lookup]
+  parallel_tool_calls: false
+  # On the last allowed turn the model may not call a tool: it has to answer
+  # with what it has, instead of being cut off by the budget.
+  tool_choice: |
+    if .budget.remaining.turns <= 1 then "none" else "auto" end
+  user: .input.question
+  tool_results: .input.tool_results
+
+---
+kind: orkestra/step
+name: think
+spec:
+  operation: think
+  retry:
+    max_attempts: 3
+
+---
+kind: orkestra/operation/http
+name: lookup
+spec:
+  method: GET
+  url: |
+    .globals.weather_url + "/lookup?city=" + (.input.city | @uri)
+
+---
+kind: orkestra/step
+name: run_lookup
+spec:
+  operation: lookup
+
+---
+kind: orkestra/operation/http
+name: notify
+spec:
+  method: POST
+  url: |
+    .globals.notify_webhook
+  body: |
+    {"text": "The agent used up its turns without an answer."}
+
+---
+kind: orkestra/step
+name: give_up
+spec:
+  operation: notify
+
+---
+# The model asked for the tool: run it with the arguments the model chose.
+kind: orkestra/transition
+name: call_tool
+spec:
+  from: think
+  priority: 20
+  on: |
+    (.input.tool_calls | length) > 0
+  to: run_lookup
+  input: |
+    {city: .input.tool_calls[0].input.city}
+
+---
+# The tool result goes back to the model, in the same conversation. The id ties
+# it to the call it answers.
+kind: orkestra/transition
+name: tool_done
+spec:
+  from: run_lookup
+  to: think
+  input: |
+    {tool_results: [{id: task("think").output.tool_calls[0].id, content: .input.body}]}
+
+---
+kind: orkestra/transition
+name: answered
+spec:
+  from: think
+  priority: 10
+  status: completed
+  on: |
+    true
+
+---
+kind: orkestra/transition
+name: gave_up
+spec:
+  from: give_up
+  status: completed

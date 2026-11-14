@@ -1,0 +1,135 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+# Every HTTP call is mocked: no network, no API key needed.
+# `responses:` answers call N with entry N; the last entry repeats.
+---
+kind: orkestra/test/mock/http
+name: mock_llm_answers_after_one_lookup
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"model":"claude-sonnet-5-5","stop_reason":"tool_use","content":[{"type":"text","text":"Checking Lyon."},{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"city":"Lyon"}}],"usage":{"input_tokens":120,"output_tokens":30}}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"model":"claude-sonnet-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"Yes: it is raining in Lyon."}],"usage":{"input_tokens":190,"output_tokens":12}}
+
+---
+# A model that never stops asking for the tool, even on the turn where it is
+# told not to.
+kind: orkestra/test/mock/http
+name: mock_llm_never_stops
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"model":"claude-sonnet-5-5","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_x","name":"lookup","input":{"city":"Lyon"}}],"usage":{"input_tokens":100,"output_tokens":10}}
+
+---
+kind: orkestra/test/mock/http
+name: mock_weather
+spec:
+  request:
+    method: GET
+    target: /lookup
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"conditions": "rain", "temp_c": 12}
+
+---
+kind: orkestra/test/mock/http
+name: mock_notify
+spec:
+  request:
+    method: POST
+    target: /notify
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"ok": true}
+
+---
+kind: orkestra/test/workflow
+name: test_answers_after_one_lookup
+spec:
+  input: |
+    {"question": "Do I need an umbrella in Lyon today?"}
+  phases:
+    - name: loop
+      mocks: [mock_llm_answers_after_one_lookup, mock_weather]
+      expectations:
+        - type: equal
+          expected: ["think", "run_lookup", "think"]
+          actual: '[.history[].step]'
+          failure: "ask the model, run its tool, ask again"
+        - type: equal
+          expected: "Yes: it is raining in Lyon."
+          actual: .steps.think.text
+          failure: "the final answer"
+        - type: equal
+          expected: ["user", "assistant", "user", "assistant"]
+          actual: '.conversations.chat | map(.role)'
+          failure: "the second call continued the conversation"
+        - type: equal
+          expected: "toolu_1"
+          actual: '.conversations.chat[2].tool_results[0].id'
+          failure: "the tool result answers the call it was made for"
+        - type: equal
+          expected: 1
+          actual: '.conversations.chat[1].tool_calls | length'
+          failure: "one tool call"
+        - type: equal
+          expected: false
+          actual: 'any(.history[]; .step == "give_up")'
+          failure: "the budget was not exhausted"
+
+---
+kind: orkestra/test/workflow
+name: test_budget_stops_a_model_that_never_stops
+spec:
+  input: |
+    {"question": "Do I need an umbrella in Lyon today?"}
+  phases:
+    - name: loop
+      mocks: [mock_llm_never_stops, mock_weather, mock_notify]
+      expectations:
+        - type: equal
+          expected: 3
+          actual: '[.history[] | select(.step == "think" and .status == "completed")] | length'
+          failure: "the budget allows 3 model calls"
+        - type: equal
+          expected: "failed"
+          actual: '[.history[] | select(.step == "think")][3].status'
+          failure: "the fourth think task is refused"
+        - type: equal
+          expected: "limit"
+          actual: '[.history[] | select(.step == "think")][3].output._error.type'
+          failure: "the refusal is a limit, not an operation error"
+        - type: equal
+          expected: "budget.turns"
+          actual: '[.history[] | select(.step == "think")][3].output._error.name'
+          failure: "the limit that was hit"
+        - type: equal
+          expected: 200
+          actual: .steps.give_up.status_code
+          failure: "on_exhausted sent the run to give_up, so the failure is handled"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "a handled limit does not fail the run"

@@ -1,0 +1,77 @@
+# Input: {"question": "What is the capital of France?"}
+# Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec:
+  secret: llm
+  in: header
+  key_name: x-api-key
+
+---
+kind: orkestra/workflow
+name: llm_conversation
+spec:
+  initial_step: ask
+  input: |
+    .
+
+---
+# Both operations name the conversation "chat" and share provider and system
+# prompt (a literal, so `orkestra validate` checks it). The second call sees the
+# first turn without anything passing it along.
+kind: orkestra/operation/llm
+name: ask
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 256
+  system: You answer in one short sentence.
+  conversation: chat
+  user: .input.question
+
+---
+kind: orkestra/operation/llm
+name: translate
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 256
+  system: You answer in one short sentence.
+  conversation: chat
+  user: '"Now say it again in French."'
+
+---
+kind: orkestra/step
+name: ask
+spec:
+  operation: ask
+
+---
+kind: orkestra/step
+name: translate
+spec:
+  operation: translate
+
+---
+kind: orkestra/transition
+name: then_translate
+spec:
+  from: ask
+  on: |
+    true
+  to: translate
+
+---
+kind: orkestra/transition
+name: done
+spec:
+  from: translate
+  status: completed

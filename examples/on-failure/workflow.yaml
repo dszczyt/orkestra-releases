@@ -1,0 +1,75 @@
+# Input: {"invoice_id": "INV-7"}
+# Imports an invoice into the ledger. Any failure no transition handles,
+# including a jq error in a transition, starts the workflow's on_failure path:
+# it alerts the operations team, and the run still ends failed.
+kind: orkestra/workflow
+name: import_invoice
+spec:
+  initial_step: fetch_invoice
+  on_failure: alert_ops
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  billing_url: "https://billing.example.com/invoices"
+  ledger_url: "https://ledger.example.com/entries"
+  alerts_url: "https://alerts.example.com/alerts"
+
+---
+kind: orkestra/operation/http
+name: get_invoice
+spec:
+  method: GET
+  url: |
+    .globals.billing_url + "/" + .input.invoice_id
+
+---
+kind: orkestra/operation/http
+name: post_entry
+spec:
+  method: POST
+  url: |
+    .globals.ledger_url
+  body: |
+    {invoice: .input.id, amount: .input.amount}
+
+---
+# The on_failure input is {failed_task: {id, step, status, input, output}, error}.
+kind: orkestra/operation/http
+name: post_alert
+spec:
+  method: POST
+  url: |
+    .globals.alerts_url
+  body: |
+    {text: ("invoice import failed at " + .input.failed_task.step + ": " + .input.error.type)}
+
+---
+kind: orkestra/step
+name: fetch_invoice
+spec:
+  operation: get_invoice
+
+---
+kind: orkestra/step
+name: record_entry
+spec:
+  operation: post_entry
+
+---
+kind: orkestra/step
+name: alert_ops
+spec:
+  operation: post_alert
+
+---
+# A non-numeric amount makes this jq fail: the task fails with
+# _error.type transition, and on_failure starts.
+kind: orkestra/transition
+name: fetched
+spec:
+  from: fetch_invoice
+  on: (.input.body.amount | tonumber) > 0
+  to: record_entry
+  input: '{id: .input.body.id, amount: (.input.body.amount | tonumber)}'

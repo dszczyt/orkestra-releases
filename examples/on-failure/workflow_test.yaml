@@ -1,0 +1,127 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+---
+kind: orkestra/test/mock/http
+name: mock_billing
+spec:
+  request:
+    method: GET
+    target: /invoices/INV-7
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"id": "INV-7", "amount": "120"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_billing_down
+spec:
+  request:
+    method: GET
+    target: /invoices/INV-7
+  response:
+    code: 500
+    headers:
+      - content-type: text/plain
+    body: |
+      "down"
+
+---
+kind: orkestra/test/mock/http
+name: mock_billing_bad_amount
+spec:
+  request:
+    method: GET
+    target: /invoices/INV-7
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"id": "INV-7", "amount": "n/a"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_ledger
+spec:
+  request:
+    method: POST
+    target: /entries
+  response:
+    code: 201
+    headers:
+      - content-type: application/json
+    body: |
+      {"ok": true}
+
+---
+kind: orkestra/test/mock/http
+name: mock_alerts
+spec:
+  request:
+    method: POST
+    target: /alerts
+  response:
+    code: 202
+    headers:
+      - content-type: application/json
+    body: |
+      {"queued": true}
+
+---
+kind: orkestra/test/workflow
+name: test_import_succeeds
+spec:
+  input: '{"invoice_id": "INV-7"}'
+  phases:
+    - name: import
+      mocks: [mock_billing, mock_ledger]
+      expectations:
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+        - type: equal
+          expected: ["fetch_invoice", "record_entry"]
+          actual: '[.history[].step]'
+
+---
+kind: orkestra/test/workflow
+name: test_failure_alerts_and_fails_the_run
+spec:
+  input: '{"invoice_id": "INV-7"}'
+  phases:
+    - name: import
+      mocks: [mock_billing_down, mock_alerts]
+      expectations:
+        - type: equal
+          expected: "failed"
+          actual: .run.status
+          failure: "on_failure cleans up, the run still fails"
+        - type: equal
+          expected: "http"
+          actual: .run.error.type
+        - type: equal
+          expected: {step: fetch_invoice, error: http}
+          actual: '[.history[] | select(.step == "alert_ops")][0].input | {step: .failed_task.step, error: .error.type}'
+          failure: "on_failure gets the failed task and its error"
+
+---
+kind: orkestra/test/workflow
+name: test_transition_error_is_a_failure
+spec:
+  input: '{"invoice_id": "INV-7"}'
+  phases:
+    - name: import
+      mocks: [mock_billing_bad_amount, mock_alerts]
+      expectations:
+        - type: equal
+          expected: "transition"
+          actual: .run.error.type
+          failure: "a jq error in a transition fails the task with _error.type transition"
+        - type: equal
+          expected: ["fetch_invoice", "alert_ops"]
+          actual: '[.history[].step]'
+        - type: equal
+          expected: "failed"
+          actual: .run.status

@@ -28,29 +28,24 @@ spec:
   result_webhook: "https://webhook.site/your-token-here"
 
 ---
-kind: orkestra/operation/http
+kind: orkestra/operation/llm
 name: classify
 spec:
+  provider: anthropic
   auth: llm_auth
-  method: POST
-  url: '"https://api.anthropic.com/v1/messages"'
-  headers: |
-    {"anthropic-version": ["2023-06-01"], "content-type": ["application/json"]}
-  body: |
-    {
-      model: "claude-sonnet-5-5",
-      max_tokens: 256,
-      messages: [{
-        role: "user",
-        content: "Classify this issue as exactly one word: bug, feature or question. Reply with the word only.\n\nTitle: \(.input.title)\n\n\(.input.body)"
-      }]
-    }
+  model: claude-sonnet-5-5
+  max_tokens: 256
+  system: Classify the issue as exactly one word. Reply with bug, feature or question.
+  user: '"Title: \(.input.title)\n\n\(.input.body)"'
 
 ---
 kind: orkestra/step
 name: classify
 spec:
   operation: classify
+  # An LLM step also retries HTTP 529 (overloaded) by default.
+  retry:
+    max_attempts: 3
 
 ---
 kind: orkestra/transition
@@ -59,7 +54,7 @@ spec:
   from: classify
   priority: 30
   on: |
-    (((.input.body.content // [])[0].text // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "bug"
+    (.input.text | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "bug"
   to: route_bug
 
 ---
@@ -69,7 +64,7 @@ spec:
   from: classify
   priority: 20
   on: |
-    (((.input.body.content // [])[0].text // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "feature"
+    (.input.text | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == "feature"
   to: route_feature
 
 ---
@@ -80,6 +75,18 @@ spec:
   priority: 10
   on: |
     true
+  to: route_question
+
+---
+# A refused call is a failed task with _error.type "llm.refusal". A human
+# looks at those, so they take the question branch. Any other failure fails the run.
+kind: orkestra/transition
+name: refused
+spec:
+  from: classify
+  status: failed
+  on: |
+    .input._error.type == "llm.refusal"
   to: route_question
 
 ---

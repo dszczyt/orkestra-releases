@@ -1,0 +1,72 @@
+# Input: {"user_id": "u-42"}
+# Fetches a user's profile and recent orders at the same time with a
+# parallel step, then merges them. With on_failure: continue, a failed branch
+# leaves its error object in its slot and the merge reports it.
+kind: orkestra/workflow
+name: user_overview
+spec:
+  initial_step: enrich
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  api_url: "https://api.example.com"
+
+---
+kind: orkestra/operation/http
+name: get_profile
+spec:
+  method: GET
+  url: |
+    .globals.api_url + "/profile?user=" + .input.user_id
+
+---
+kind: orkestra/operation/http
+name: get_orders
+spec:
+  method: GET
+  url: |
+    .globals.api_url + "/orders?user=" + .input.user_id + "&limit=" + (.input.limit | tostring)
+
+---
+kind: orkestra/operation/pass
+name: merge
+spec:
+  output: |
+    {
+      name: .input.profile.body.name,
+      orders: .input.orders.body.count,
+      failed: [.input | to_entries[] | select(.value._error != null) | .key]
+    }
+
+---
+# Each branch is one operation, with its own input (default: the step's
+# input) and its own retry. The step's output is an object keyed by branch.
+kind: orkestra/step
+name: enrich
+spec:
+  parallel:
+    on_failure: continue
+    branches:
+      - name: profile
+        operation: get_profile
+      - name: orders
+        operation: get_orders
+        input: '{user_id: .input.user_id, limit: 10}'
+        retry:
+          max_attempts: 2
+          backoff_base: 10ms
+
+---
+kind: orkestra/step
+name: merge
+spec:
+  operation: merge
+
+---
+kind: orkestra/transition
+name: enriched
+spec:
+  from: enrich
+  to: merge

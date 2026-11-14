@@ -1,0 +1,271 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+# A test addresses its signals to the whole run tree: the approval wait lives in
+# the child run of the tool call. The test clock is virtual.
+---
+kind: orkestra/test/mock/http
+name: mock_llm_asks
+spec:
+  request: {method: POST, target: /v1/messages}
+  response:
+    code: 200
+    headers: [{content-type: application/json}]
+    body: |
+      {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"send_email","input":{"to":"jane@example.com","subject":"Your parcel shipped","body":"Order A-1042 is on its way."}}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_answers
+spec:
+  request: {method: POST, target: /v1/messages}
+  response:
+    code: 200
+    headers: [{content-type: application/json}]
+    body: |
+      {"stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_mail
+spec:
+  request: {method: POST, target: /v1/send}
+  response:
+    code: 200
+    headers: [{content-type: application/json}]
+    body: |
+      {"queued": true}
+
+---
+kind: orkestra/test/workflow
+name: test_the_email_is_sent_after_approval
+spec:
+  input: '{"request": "Tell the customer in order A-1042 that their parcel shipped."}'
+  phases:
+    - name: ask
+      mocks: [mock_llm_asks]
+      expectations:
+        - type: equal
+          expected: "waiting"
+          actual: '[.tasks[] | select(.step == "approve.send_email")][0].status'
+          failure: "the call waits for a person"
+        - type: equal
+          expected: 0
+          actual: '[.tasks[] | select(.step == "tool.send_email")] | length'
+          failure: "the email is not sent before the approval"
+        - type: equal
+          expected: "running"
+          actual: .run.status
+          failure: "a parked run stays running"
+    - name: approve
+      mocks: [mock_llm_answers, mock_mail]
+      signals:
+        - name: approval
+          key: toolu_1
+          payload: {decision: approve, reason: "looks right"}
+      expectations:
+        - type: equal
+          expected: 1
+          actual: '[.tasks[] | select(.step == "tool.send_email" and .status == "completed")] | length'
+          failure: "the email is sent once approved"
+        - type: equal
+          expected: "Done."
+          actual: '.steps["mailer.think"].text'
+          failure: "the agent ends on its answer"
+        - type: equal
+          expected: false
+          actual: '.conversations.mailer[2].tool_results[0].is_error'
+          failure: "the model got the tool's result"
+
+---
+kind: orkestra/test/workflow
+name: test_a_denial_goes_back_to_the_model
+spec:
+  input: '{"request": "Tell the customer in order A-1042 that their parcel shipped."}'
+  phases:
+    - name: ask
+      mocks: [mock_llm_asks]
+    - name: deny
+      mocks: [mock_llm_answers]
+      signals:
+        - name: approval
+          key: toolu_1
+          payload: {decision: deny, reason: "wrong customer"}
+      expectations:
+        - type: equal
+          expected: 0
+          actual: '[.tasks[] | select(.step == "tool.send_email")] | length'
+          failure: "a denied call never runs"
+        - type: equal
+          expected: "denied: wrong customer"
+          actual: '.conversations.mailer[2].tool_results[0].content'
+          failure: "the model reads the reason"
+        - type: equal
+          expected: true
+          actual: '.conversations.mailer[2].tool_results[0].is_error'
+          failure: "a denial is an error result"
+
+---
+kind: orkestra/test/workflow
+name: test_no_answer_is_a_denial
+spec:
+  input: '{"request": "Tell the customer in order A-1042 that their parcel shipped."}'
+  phases:
+    - name: ask
+      mocks: [mock_llm_asks]
+    - name: a_day_later
+      flags:
+        advance_clock: 25h
+      mocks: [mock_llm_answers]
+      expectations:
+        - type: equal
+          expected: "denied: approval timed out"
+          actual: '.conversations.mailer[2].tool_results[0].content'
+          failure: "a timeout is a denial"
+        - type: equal
+          expected: 0
+          actual: '[.tasks[] | select(.step == "tool.send_email")] | length'
+          failure: "the email is not sent"
+
+---
+# An answer for another call does not approve this one: the key is the id of the
+# tool call.
+kind: orkestra/test/workflow
+name: test_an_answer_for_another_call_does_not_approve
+spec:
+  input: '{"request": "Tell the customer in order A-1042 that their parcel shipped."}'
+  phases:
+    - name: ask
+      mocks: [mock_llm_asks]
+    - name: wrong_key
+      mocks: [mock_llm_answers, mock_mail]
+      signals:
+        - name: approval
+          key: toolu_other
+          payload: {decision: approve}
+      expectations:
+        - type: equal
+          expected: "waiting"
+          actual: '[.tasks[] | select(.step == "approve.send_email")][0].status'
+          failure: "the call is still waiting for its own approval"
+        - type: equal
+          expected: 0
+          actual: '[.tasks[] | select(.step == "tool.send_email")] | length'
+          failure: "the email is not sent"
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_bad_input_then_answers
+spec:
+  request: {method: POST, target: /v1/messages}
+  responses:
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"send_email","input":{"to":"jane@example.com"}}]}
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_empty_id
+spec:
+  request: {method: POST, target: /v1/messages}
+  response:
+    code: 200
+    headers: [{content-type: application/json}]
+    body: |
+      {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"","name":"send_email","input":{"to":"jane@example.com","subject":"Your parcel shipped","body":"Order A-1042 is on its way."}}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_same_id_twice
+spec:
+  request: {method: POST, target: /v1/messages}
+  response:
+    code: 200
+    headers: [{content-type: application/json}]
+    body: |
+      {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"send_email","input":{"to":"jane@example.com","subject":"One","body":"First."}},{"type":"tool_use","id":"toolu_1","name":"send_email","input":{"to":"joe@example.com","subject":"Two","body":"Second."}}]}
+
+---
+# Input that breaks the tool's input_schema is refused before anyone is asked
+# and before the tool runs. The model gets an error result and the run goes on.
+kind: orkestra/test/workflow
+name: test_input_that_breaks_the_schema_goes_back_to_the_model
+spec:
+  input: '{"request": "Tell the customer in order A-1042 that their parcel shipped."}'
+  phases:
+    - name: bad_call_then_answer
+      mocks: [mock_llm_bad_input_then_answers]
+      expectations:
+        - type: equal
+          expected: 0
+          actual: '[.tasks[] | select(.step == "approve.send_email" and .status == "waiting")] | length'
+          failure: "nobody is asked to approve a call that cannot run"
+        - type: equal
+          expected: 0
+          actual: '[.tasks[] | select(.step == "tool.send_email")] | length'
+          failure: "the tool does not run"
+        - type: equal
+          expected: true
+          actual: '.conversations.mailer[2].tool_results[0].is_error'
+          failure: "the model gets an error result"
+        - type: equal
+          expected: true
+          actual: '.conversations.mailer[2].tool_results[0].content | contains("invalid input for tool")'
+          failure: "the error says what is wrong"
+        - type: equal
+          expected: "Done."
+          actual: '.steps["mailer.think"].text'
+          failure: "the model recovers and the run completes"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "a bad call is not a run failure"
+
+---
+# An empty id from the provider gets a synthetic one, which keys the approval.
+kind: orkestra/test/workflow
+name: test_an_empty_call_id_is_replaced
+spec:
+  input: '{"request": "Tell the customer in order A-1042 that their parcel shipped."}'
+  phases:
+    - name: ask
+      mocks: [mock_llm_empty_id]
+    - name: approve
+      mocks: [mock_llm_answers, mock_mail]
+      signals:
+        - name: approval
+          key: call_0
+          payload: {decision: approve}
+      expectations:
+        - type: equal
+          expected: 1
+          actual: '[.tasks[] | select(.step == "tool.send_email" and .status == "completed")] | length'
+          failure: "the approval of the synthetic id lets the call through"
+
+---
+# Two calls with the same id are two calls: approving the first id approves one.
+kind: orkestra/test/workflow
+name: test_a_repeated_call_id_does_not_approve_both_calls
+spec:
+  input: '{"request": "Tell both customers that their parcel shipped."}'
+  phases:
+    - name: ask
+      mocks: [mock_llm_same_id_twice]
+    - name: approve_the_first
+      mocks: [mock_llm_answers, mock_mail]
+      signals:
+        - name: approval
+          key: toolu_1
+          payload: {decision: approve}
+      expectations:
+        - type: equal
+          expected: 1
+          actual: '[.tasks[] | select(.step == "tool.send_email" and .status == "completed")] | length'
+          failure: "only the first call is approved"
+        - type: equal
+          expected: 1
+          actual: '[.tasks[] | select(.step == "approve.send_email" and .status == "waiting")] | length'
+          failure: "the second call still waits for its own id"

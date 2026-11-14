@@ -1,12 +1,10 @@
 # Input: {"question": "Do I need an umbrella in Lyon today?"}
 # Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
 #
-# A tool-using agent as a plain workflow:
-#   think -> asks Claude, with the tool list
-#   think -> geocode or forecast, when Claude asks for a tool
-#   tool  -> think, with the tool result appended to the conversation
-#   think -> end, when Claude answers or the turn budget is spent
-# Every LLM call and every tool call is a task: stored, retried, inspectable, resumable.
+# A tool-using agent: one orkestra/agent, two tools, one budget. `orkestra
+# compile workflow.yaml` prints the steps, transitions and operations it
+# expands to; nothing is hidden. Every model call and every tool call is a
+# task: stored, retried, inspectable, resumable.
 kind: orkestra/secret
 name: llm
 spec:
@@ -15,154 +13,48 @@ spec:
 ---
 kind: orkestra/auth/api_key
 name: llm_auth
-spec:
-  secret: llm
-  in: header
-  key_name: x-api-key
+spec: {secret: llm, in: header, key_name: x-api-key}
 
 ---
 kind: orkestra/workflow
 name: weather_agent
 spec:
   description: 'Answers a weather question for any city with live Open-Meteo data. Input: {"question": "..."}'
-  initial_step: think
-  input: |
-    .
+  initial_step: weather
+  input: .
 
 ---
-kind: orkestra/configmap
-name: globals
+kind: orkestra/agent
+name: weather
 spec:
-  model: claude-sonnet-5-5
-  # Hard cap on LLM calls per run. The last allowed call gets tool_choice none,
-  # so Claude must answer with what it has.
-  max_turns: 6
-  tools:
-    - name: geocode
-      description: Find the latitude and longitude of a city.
-      input_schema:
-        type: object
-        properties:
-          name: {type: string, description: "City name, e.g. Lyon"}
-        required: [name]
-    - name: forecast
-      description: Hourly precipitation probability (%) and temperature (C) for today at a location.
-      input_schema:
-        type: object
-        properties:
-          latitude: {type: number}
-          longitude: {type: number}
-        required: [latitude, longitude]
-
-# =========================
-# LLM
-# =========================
----
-kind: orkestra/operation/http
-name: think
-spec:
+  provider: anthropic
   auth: llm_auth
-  method: POST
-  url: '"https://api.anthropic.com/v1/messages"'
-  headers: |
-    {"anthropic-version": ["2023-06-01"], "content-type": ["application/json"]}
-  body: |
-    (.input.messages // [{role: "user", content: .input.question}]) as $messages |
-    ([$messages[] | select(.role == "assistant")] | length + 1) as $turn |
-    {
-      model: .globals.model,
-      max_tokens: 1024,
-      system: "You answer weather questions. Use the tools for coordinates and forecasts; never guess them. Answer in one or two sentences.",
-      tools: .globals.tools,
-      tool_choice: (if $turn >= .globals.max_turns then {type: "none"} else {type: "auto", disable_parallel_tool_use: true} end),
-      messages: $messages
-    }
+  model: claude-sonnet-5-5
+  max_tokens: 1024
+  system: You answer weather questions. Use the tools for coordinates and forecasts; never guess them. Answer in one or two sentences.
+  prompt: .input.question
+  # The agent is a loop, so it needs a bound. The last allowed turn may not call
+  # a tool: the model has to answer with what it has. A model that ignores that
+  # is refused on the next turn, and on_exhausted says where the run goes.
+  budget: {turns: 6, cost_usd: 0.05, wall_clock: 60s, on_exhausted: gave_up}
+  tools:
+    geocode:
+      description: Find the latitude and longitude of a city.
+      input_schema: {type: object, properties: {name: {type: string, description: "City name, e.g. Lyon"}}, required: [name]}
+      operation: geocode
+    forecast:
+      description: Hourly precipitation probability (%) and temperature (C) for today at a location.
+      input_schema: {type: object, properties: {latitude: {type: number}, longitude: {type: number}}, required: [latitude, longitude]}
+      operation: forecast
 
 ---
-kind: orkestra/step
-name: think
-spec:
-  operation: think
-  retry:
-    max_attempts: 4
-    backoff_base: 2s
-    backoff_max: 30s
-    # 529 is Anthropic's "overloaded".
-    on_status_codes: [429, 500, 502, 503, 504, 529]
-
-# Safety net: Claude still asks for a tool after max_turns calls. Stop the run.
----
-kind: orkestra/transition
-name: budget_exhausted
-spec:
-  from: think
-  priority: 100
-  on: |
-    .input.body.stop_reason == "tool_use" and (tasks("think") | length) >= .globals.max_turns
-  status: completed
-
-# Tool dispatch: one transition per tool. The tool step's input carries the
-# conversation so far plus the tool call to run.
----
-kind: orkestra/transition
-name: call_geocode
-spec:
-  from: think
-  priority: 20
-  on: |
-    .input.body.stop_reason == "tool_use" and (.input.body.content | map(select(.type == "tool_use"))[0].name) == "geocode"
-  to: geocode
-  input: |
-    task("think").input as $in |
-    {
-      messages: (($in.messages // [{role: "user", content: $in.question}]) + [{role: "assistant", content: .input.body.content}]),
-      call: (.input.body.content | map(select(.type == "tool_use"))[0])
-    }
-
----
-kind: orkestra/transition
-name: call_forecast
-spec:
-  from: think
-  priority: 20
-  on: |
-    .input.body.stop_reason == "tool_use" and (.input.body.content | map(select(.type == "tool_use"))[0].name) == "forecast"
-  to: forecast
-  input: |
-    task("think").input as $in |
-    {
-      messages: (($in.messages // [{role: "user", content: $in.question}]) + [{role: "assistant", content: .input.body.content}]),
-      call: (.input.body.content | map(select(.type == "tool_use"))[0])
-    }
-
-# Claude answered (end_turn, max_tokens, or an unknown tool): the run ends here.
----
-kind: orkestra/transition
-name: answered
-spec:
-  from: think
-  priority: 10
-  status: completed
-
-# =========================
-# TOOLS
-# =========================
-# disable_http_failure: an HTTP error goes back to Claude as a tool result
-# instead of failing the run, so the agent can recover.
----
+# A tool error does not fail the run: it goes back to the model as the result.
 kind: orkestra/operation/http
 name: geocode
 spec:
   method: GET
   disable_http_failure: true
-  url: |
-    "https://geocoding-api.open-meteo.com/v1/search?name=\(.input.call.input.name | @uri)&count=1"
-
----
-kind: orkestra/step
-name: geocode
-spec:
-  operation: geocode
+  url: '"https://geocoding-api.open-meteo.com/v1/search?name=\(.input.name | @uri)&count=1"'
 
 ---
 kind: orkestra/operation/http
@@ -170,42 +62,15 @@ name: forecast
 spec:
   method: GET
   disable_http_failure: true
-  url: |
-    "https://api.open-meteo.com/v1/forecast?latitude=\(.input.call.input.latitude)&longitude=\(.input.call.input.longitude)&hourly=precipitation_probability,temperature_2m&forecast_days=1&timezone=auto"
+  url: '"https://api.open-meteo.com/v1/forecast?latitude=\(.input.latitude)&longitude=\(.input.longitude)&hourly=precipitation_probability,temperature_2m&forecast_days=1&timezone=auto"'
+
+---
+kind: orkestra/operation/pass
+name: gave_up
+spec:
+  output: '{text: "I could not finish within my turn budget."}'
 
 ---
 kind: orkestra/step
-name: forecast
-spec:
-  operation: forecast
-
-# Back to Claude with the tool result. tool_use_id must match the call.
----
-kind: orkestra/transition
-name: geocode_done
-spec:
-  from: geocode
-  to: think
-  input: |
-    task("geocode").input as $state |
-    {
-      messages: ($state.messages + [{
-        role: "user",
-        content: [{type: "tool_result", tool_use_id: $state.call.id, content: (.input | {status_code, body} | tojson)}]
-      }])
-    }
-
----
-kind: orkestra/transition
-name: forecast_done
-spec:
-  from: forecast
-  to: think
-  input: |
-    task("forecast").input as $state |
-    {
-      messages: ($state.messages + [{
-        role: "user",
-        content: [{type: "tool_result", tool_use_id: $state.call.id, content: (.input | {status_code, body} | tojson)}]
-      }])
-    }
+name: gave_up
+spec: {operation: gave_up}

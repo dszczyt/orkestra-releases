@@ -1,0 +1,146 @@
+# Input: {"order_id": "A-1042"}
+# A manager approves an order in Slack; the run waits for the answer, up to
+# 48 hours. Approved orders ship after a short cool-down. Without an answer,
+# the order is escalated.
+kind: orkestra/workflow
+name: order_approval
+spec:
+  initial_step: ask_manager
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  # Replace with your own endpoints (never commit a real webhook URL).
+  slack_webhook_url: "https://hooks.slack.com/services/T000/B000/XXXX"
+  shipping_url: "https://shipping.example.com/orders"
+  escalation_url: "https://oncall.example.com/escalate"
+
+---
+kind: orkestra/operation/http
+name: ask_manager
+spec:
+  method: POST
+  url: |
+    .globals.slack_webhook_url
+  body: |
+    {text: "Approve order \(.input.order_id)? POST /v1/runs/\(run.id)/signals/approval with key \(.input.order_id)"}
+
+---
+# Waits for POST /v1/runs/{run_id}/signals/approval with this order's key.
+# Its output is the signal payload, e.g. {"approved": true}.
+kind: orkestra/operation/wait
+name: manager_approval
+spec:
+  signal: approval
+  key: .input.order_id
+  timeout: 48h
+
+---
+# A routing step: no side effect, the transitions decide.
+kind: orkestra/operation/pass
+name: decide
+spec:
+  output: '{approved: (.input.approved == true), order_id: task("ask_manager").input.order_id}'
+
+---
+kind: orkestra/operation/wait
+name: cool_down
+spec:
+  duration: 10m
+
+---
+kind: orkestra/operation/http
+name: ship
+spec:
+  method: POST
+  url: |
+    .globals.shipping_url
+  body: |
+    {order_id: task("decide").output.order_id}
+
+---
+kind: orkestra/operation/http
+name: escalate
+spec:
+  method: POST
+  url: |
+    .globals.escalation_url
+  body: |
+    {order_id: task("ask_manager").input.order_id, reason: .input._error.type}
+
+---
+kind: orkestra/step
+name: ask_manager
+spec:
+  operation: ask_manager
+
+---
+kind: orkestra/step
+name: wait_approval
+spec:
+  operation: manager_approval
+
+---
+kind: orkestra/step
+name: decide
+spec:
+  operation: decide
+
+---
+kind: orkestra/step
+name: cool_down
+spec:
+  operation: cool_down
+
+---
+kind: orkestra/step
+name: ship
+spec:
+  operation: ship
+
+---
+kind: orkestra/step
+name: escalate
+spec:
+  operation: escalate
+
+---
+kind: orkestra/transition
+name: ask_then_wait
+spec:
+  from: ask_manager
+  to: wait_approval
+  input: task("ask_manager").input
+
+---
+kind: orkestra/transition
+name: answered
+spec:
+  from: wait_approval
+  to: decide
+
+---
+# No answer within 48h: the wait fails with _error.type timeout.
+kind: orkestra/transition
+name: approval_timed_out
+spec:
+  from: wait_approval
+  status: failed
+  on: .input._error.type == "timeout"
+  to: escalate
+
+---
+kind: orkestra/transition
+name: approved
+spec:
+  from: decide
+  to: cool_down
+  on: .input.approved
+
+---
+kind: orkestra/transition
+name: cooled_down
+spec:
+  from: cool_down
+  to: ship

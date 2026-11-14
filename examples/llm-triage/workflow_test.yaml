@@ -11,7 +11,7 @@ spec:
     headers:
       - content-type: application/json
     body: |
-      {"content":[{"type":"text","text":"bug"}]}
+      {"model":"claude-sonnet-5-5","content":[{"type":"text","text":"bug"}],"stop_reason":"end_turn","usage":{"input_tokens":412,"output_tokens":2}}
 
 ---
 kind: orkestra/test/mock/http
@@ -25,7 +25,7 @@ spec:
     headers:
       - content-type: application/json
     body: |
-      {"content":[{"type":"text","text":"feature"}]}
+      {"model":"claude-sonnet-5-5","content":[{"type":"text","text":"feature"}],"stop_reason":"end_turn","usage":{"input_tokens":412,"output_tokens":2}}
 
 ---
 kind: orkestra/test/mock/http
@@ -39,22 +39,35 @@ spec:
     headers:
       - content-type: application/json
     body: |
-      {"content":[{"type":"text","text":"question"}]}
+      {"model":"claude-sonnet-5-5","content":[{"type":"text","text":"question"}],"stop_reason":"end_turn","usage":{"input_tokens":412,"output_tokens":2}}
 
 ---
 kind: orkestra/test/mock/http
-name: mock_llm_error
+name: mock_llm_unclear
 spec:
   request:
     method: POST
     target: /v1/messages
   response:
-    # 200 on purpose: non-2xx fails the operation before routing. This covers a 2xx body without `content`.
     code: 200
     headers:
       - content-type: application/json
     body: |
-      {"error":{"type":"overloaded"}}
+      {"model":"claude-sonnet-5-5","content":[{"type":"text","text":"I am not sure."}],"stop_reason":"end_turn","usage":{"input_tokens":412,"output_tokens":8}}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm_refusal
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"model":"claude-sonnet-5-5","content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"declined"},"usage":{"input_tokens":412,"output_tokens":0}}
 
 ---
 kind: orkestra/test/mock/http
@@ -88,6 +101,14 @@ spec:
           expected: null
           actual: .steps.route_feature
           failure: "other branches must not run"
+        - type: equal
+          expected: "bug"
+          actual: .steps.classify.text
+          failure: "the model text is the step output"
+        - type: equal
+          expected: 0.000844
+          actual: .steps.classify.cost_usd
+          failure: "412 input tokens at 2 USD and 2 output tokens at 10 USD per million"
 
 ---
 kind: orkestra/test/workflow
@@ -129,19 +150,43 @@ spec:
 
 ---
 kind: orkestra/test/workflow
-name: test_error_body_takes_default_branch
+name: test_unclear_answer_takes_default_branch
 spec:
   input: |
     {"title": "Some issue", "body": "Details"}
   phases:
     - name: triage
-      mocks: [mock_llm_error, mock_result]
+      mocks: [mock_llm_unclear, mock_result]
       expectations:
         - type: equal
           expected: 200
           actual: .steps.route_question.status_code
-          failure: "default branch should run on an error body"
+          failure: "default branch should run on an answer that is not bug or feature"
         - type: exactly
           expected: null
           actual: .steps.route_bug
           failure: "bug branch must not run"
+
+---
+kind: orkestra/test/workflow
+name: test_refusal_goes_to_a_human
+spec:
+  input: |
+    {"title": "Some issue", "body": "Details"}
+  phases:
+    - name: triage
+      mocks: [mock_llm_refusal, mock_result]
+      expectations:
+        - type: equal
+          expected: "llm.refusal"
+          # .steps holds completed tasks only: a failed one is in .history.
+          actual: '[.history[] | select(.step == "classify")][0].output._error.type'
+          failure: "a refusal is a typed failure"
+        - type: equal
+          expected: "failed"
+          actual: '[.history[] | select(.step == "classify")][0].status'
+          failure: "the classify task failed"
+        - type: equal
+          expected: 200
+          actual: .steps.route_question.status_code
+          failure: "a refused call takes the question branch"

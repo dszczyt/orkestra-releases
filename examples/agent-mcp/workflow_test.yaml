@@ -1,0 +1,82 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+# The MCP server and the model are mocked: no network, no process, no key.
+---
+kind: orkestra/test/mock/mcp
+name: mock_docs
+spec:
+  server: docs
+  tools:
+    search_docs:
+      result:
+        text: "Rotate a key in Settings > API keys: create the new key, then revoke the old one."
+
+---
+kind: orkestra/test/mock/mcp
+name: mock_docs_down
+spec:
+  server: docs
+  tools:
+    search_docs:
+      result: {is_error: true, text: "index is rebuilding, try again later"}
+
+---
+kind: orkestra/test/mock/http
+name: mock_llm
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"search_docs","input":{"query":"rotate api key"}}]}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"stop_reason":"end_turn","content":[{"type":"text","text":"Create the new key in Settings > API keys, then revoke the old one."}]}
+
+---
+kind: orkestra/test/workflow
+name: test_the_agent_calls_the_mcp_tool_and_answers
+spec:
+  input: |
+    {"question": "How do I rotate an API key?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm, mock_docs]
+      expectations:
+        - type: equal
+          expected: "Create the new key in Settings > API keys, then revoke the old one."
+          actual: '.steps["docs.think"].text'
+          failure: "the run should end on the model's answer"
+        - type: equal
+          expected: "rotate api key"
+          actual: '[.tasks[] | select(.step == "tool.search_docs")][0].input.query'
+          failure: "the tool step gets the arguments the model wrote"
+        - type: equal
+          expected: "Rotate a key in Settings > API keys: create the new key, then revoke the old one."
+          actual: '.conversations.docs[2].tool_results[0].content'
+          failure: "the model gets the text of the MCP result"
+
+---
+# isError is a completed call: the model reads the failure and answers.
+kind: orkestra/test/workflow
+name: test_a_tool_failure_goes_back_to_the_model
+spec:
+  input: |
+    {"question": "How do I rotate an API key?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm, mock_docs_down]
+      expectations:
+        - type: equal
+          expected: true
+          actual: '.conversations.docs[2].tool_results[0].is_error'
+          failure: "an MCP tool failure is an error result for the model, not a failed run"
+        - type: equal
+          expected: "completed"
+          actual: '[.tasks[] | select(.step == "tool.search_docs")][0].status'
+          failure: "the tool task itself completed"

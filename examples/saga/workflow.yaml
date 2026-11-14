@@ -1,0 +1,131 @@
+# Input: {"order_id": "A-1042", "amount": 120}
+# Books an order in three calls: reserve stock, charge the card, book the
+# shipment. When the run fails, the completed calls are undone in reverse
+# order (refund, then release), then on_failure tells the team.
+kind: orkestra/workflow
+name: book_order
+spec:
+  initial_step: reserve_stock
+  on_failure: notify_team
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  stock_url: "https://stock.example.com"
+  payments_url: "https://payments.example.com"
+  shipping_url: "https://shipping.example.com"
+  chat_url: "https://chat.example.com/messages"
+
+---
+kind: orkestra/operation/http
+name: reserve
+spec:
+  method: POST
+  url: |
+    .globals.stock_url + "/reservations"
+  body: |
+    {order: .input.order_id}
+
+---
+kind: orkestra/operation/http
+name: charge
+spec:
+  method: POST
+  url: |
+    .globals.payments_url + "/charges"
+  body: |
+    {order: task("reserve_stock").input.order_id, amount: task("reserve_stock").input.amount}
+
+---
+kind: orkestra/operation/http
+name: ship
+spec:
+  method: POST
+  url: |
+    .globals.shipping_url + "/shipments"
+  body: |
+    {order: task("reserve_stock").input.order_id}
+
+---
+# A compensation's input is {input, output} of the task it undoes.
+kind: orkestra/operation/http
+name: refund
+spec:
+  method: POST
+  url: |
+    .globals.payments_url + "/refunds"
+  body: |
+    {charge: .input.output.body.charge_id}
+
+---
+kind: orkestra/operation/http
+name: release
+spec:
+  method: POST
+  url: |
+    .globals.stock_url + "/releases"
+  body: |
+    {reservation: .input.output.body.reservation_id}
+
+---
+kind: orkestra/operation/http
+name: notify
+spec:
+  method: POST
+  url: |
+    .globals.chat_url
+  body: |
+    {text: ("order failed at " + .input.failed_task.step + " (" + .input.error.type + ")")}
+
+---
+kind: orkestra/step
+name: reserve_stock
+spec:
+  operation: reserve
+  compensate: release_stock
+
+---
+kind: orkestra/step
+name: charge_card
+spec:
+  operation: charge
+  compensate: refund_card
+
+---
+kind: orkestra/step
+name: book_shipment
+spec:
+  operation: ship
+
+---
+kind: orkestra/step
+name: release_stock
+spec:
+  operation: release
+
+---
+kind: orkestra/step
+name: refund_card
+spec:
+  operation: refund
+
+---
+kind: orkestra/step
+name: notify_team
+spec:
+  operation: notify
+
+---
+kind: orkestra/transition
+name: reserved
+spec:
+  from: reserve_stock
+  to: charge_card
+
+---
+kind: orkestra/transition
+name: charged
+spec:
+  from: charge_card
+  to: book_shipment

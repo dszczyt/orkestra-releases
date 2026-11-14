@@ -1,0 +1,72 @@
+# Input: {"lead": {"email": "jane@example.com"}}
+# Scores a lead with a sub-workflow (scoring/workflow.yaml), then routes it.
+# The sub-workflow runs as a child run; the step's output is its result.
+kind: orkestra/workflow
+name: lead_intake
+spec:
+  initial_step: score
+
+---
+kind: orkestra/configmap
+name: globals
+spec:
+  crm_url: "https://crm.example.com/leads"
+
+---
+kind: orkestra/operation/workflow
+name: score_lead
+spec:
+  workflow: ./scoring/workflow.yaml
+  input: '{lead: .input.lead}'
+
+---
+kind: orkestra/operation/http
+name: save_lead
+spec:
+  method: POST
+  url: |
+    .globals.crm_url
+  body: |
+    {email: task("score").input.lead.email, tier: .input.tier, score: .input.score}
+
+---
+# Scoring is down: keep the lead, unscored.
+kind: orkestra/operation/pass
+name: unscored
+spec:
+  output: '{tier: "unscored", reason: .input._error.type, child_status: .input._error.status}'
+
+---
+kind: orkestra/step
+name: score
+spec:
+  operation: score_lead
+
+---
+kind: orkestra/step
+name: save_lead
+spec:
+  operation: save_lead
+
+---
+kind: orkestra/step
+name: unscored
+spec:
+  operation: unscored
+
+---
+kind: orkestra/transition
+name: scored
+spec:
+  from: score
+  to: save_lead
+
+---
+# A failed child run fails the step with _error.type child_run.
+kind: orkestra/transition
+name: scoring_failed
+spec:
+  from: score
+  status: failed
+  on: .input._error.type == "child_run"
+  to: unscored

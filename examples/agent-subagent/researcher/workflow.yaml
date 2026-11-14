@@ -1,0 +1,43 @@
+# The sub-agent: a workflow like any other, started by the lead agent as a tool.
+# Input: {"topic": "..."}. Its final output is what the lead agent reads.
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec: {secret: llm, in: header, key_name: x-api-key}
+
+---
+kind: orkestra/workflow
+name: researcher
+spec:
+  initial_step: researcher
+  input: .
+
+---
+kind: orkestra/agent
+name: researcher
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 1024
+  system: You research a topic with the lookup tool and answer in two sentences.
+  prompt: .input.topic
+  budget: {turns: 4}
+  tools:
+    lookup:
+      description: Look a term up in the encyclopedia.
+      input_schema: {type: object, properties: {term: {type: string}}, required: [term]}
+      operation: lookup
+
+---
+kind: orkestra/operation/http
+name: lookup
+spec:
+  method: GET
+  disable_http_failure: true
+  url: '"https://encyclopedia.example.com/v1/search?q=\(.input.term | @uri)"'

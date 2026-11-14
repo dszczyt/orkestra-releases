@@ -1,0 +1,110 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+# Both agents share the one mocked model endpoint: `responses:` answers call N
+# with entry N, in the order the calls happen.
+---
+kind: orkestra/test/mock/http
+name: mock_llm
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    # 1. lead: delegate
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"research","input":{"topic":"Eiffel Tower"}}]}
+    # 2. researcher: look something up
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_r1","name":"lookup","input":{"term":"Eiffel Tower"}}]}
+    # 3. researcher: answer
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"end_turn","content":[{"type":"text","text":"Designed by Gustave Eiffel's company, built 1887 to 1889."}]}
+    # 4. lead: answer
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"end_turn","content":[{"type":"text","text":"Gustave Eiffel's company designed it, and it was built from 1887 to 1889."}]}
+
+---
+kind: orkestra/test/mock/http
+name: mock_encyclopedia
+spec:
+  request:
+    method: GET
+    target: /v1/search
+  response:
+    code: 200
+    headers: [{content-type: application/json}]
+    body: |
+      {"results":[{"title":"Eiffel Tower","summary":"Wrought-iron tower, 1887-1889."}]}
+
+---
+kind: orkestra/test/workflow
+name: test_the_lead_uses_the_sub_agent_answer
+spec:
+  input: |
+    {"question": "Who designed the Eiffel Tower, and when was it built?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm, mock_encyclopedia]
+      expectations:
+        - type: equal
+          expected: "Gustave Eiffel's company designed it, and it was built from 1887 to 1889."
+          actual: '.steps["lead.think"].text'
+          failure: "the lead agent ends on its own answer"
+        - type: equal
+          expected: "Designed by Gustave Eiffel's company, built 1887 to 1889."
+          actual: '.conversations.lead[2].tool_results[0].content'
+          failure: "the sub-agent's final output is the tool result"
+        - type: equal
+          expected: 2
+          actual: '[.tasks[] | select(.step == "researcher.think")] | length'
+          failure: "the sub-agent ran as a child run, with its own two model calls"
+        - type: equal
+          expected: 1
+          actual: '[.tasks[] | select(.step == "tool.lookup")] | length'
+          failure: "the sub-agent's own tool ran in a child run of its own"
+
+---
+# The lead's budget is four turns, and the sub-agent's model calls count: a
+# researcher that never answers spends them, so the lead's own next model call
+# is refused.
+kind: orkestra/test/mock/http
+name: mock_llm_researcher_never_stops
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"research","input":{"topic":"Eiffel Tower"}}]}
+    - code: 200
+      headers: [{content-type: application/json}]
+      body: |
+        {"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_r","name":"lookup","input":{"term":"x"}}]}
+
+---
+kind: orkestra/test/workflow
+name: test_the_sub_agent_turns_count_against_the_lead
+spec:
+  input: |
+    {"question": "Who designed the Eiffel Tower, and when was it built?"}
+  phases:
+    - name: agent
+      mocks: [mock_llm_researcher_never_stops, mock_encyclopedia]
+      expectations:
+        - type: equal
+          expected: "I could not finish within my turn budget."
+          actual: .steps.gave_up.text
+          failure: "the lead ran out of turns because of its sub-agent"
+        - type: equal
+          expected: "budget.turns"
+          actual: '[.tasks[] | select((.output | type) == "object" and .output._error.type == "limit")][0].output._error.name'
+          failure: "the first limit refusal is the budget of the lead, reached from a child run (the failed tool.research task itself is a child_run error and comes first)"

@@ -1,0 +1,101 @@
+# Run: ORKESTRA_LLM_API_KEY=test orkestra test workflow.yaml workflow_test.yaml
+# Every HTTP call is mocked: no network, no API key needed.
+# `responses:` answers call N with entry N; the last entry repeats.
+---
+kind: orkestra/test/mock/http
+name: mock_llm
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"model":"claude-sonnet-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"Paris."}],"usage":{"input_tokens":20,"output_tokens":3}}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"model":"claude-sonnet-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"Paris."}],"usage":{"input_tokens":40,"output_tokens":3}}
+
+---
+kind: orkestra/test/workflow
+name: test_second_call_continues_the_conversation
+spec:
+  input: |
+    {"question": "What is the capital of France?"}
+  phases:
+    - name: chat
+      mocks: [mock_llm]
+      expectations:
+        - type: equal
+          expected: 4
+          actual: '.conversations.chat | length'
+          failure: "two calls, a user turn and an assistant turn each"
+        - type: equal
+          expected: "What is the capital of France?"
+          actual: '.conversations.chat[0].text'
+          failure: "the first user turn is the question"
+        - type: equal
+          expected: "Paris."
+          actual: '.conversations.chat[1].text'
+          failure: "the first assistant turn is the first answer"
+        - type: equal
+          expected: "Now say it again in French."
+          actual: '.conversations.chat[2].text'
+          failure: "the second call appended its own user turn to the same conversation"
+        - type: equal
+          expected: []
+          actual: .steps.translate.content
+          failure: "the blocks live in the conversation, not in the task output"
+
+---
+# The same scenario replayed from a cassette: the answers, and the usage that
+# came with them, are the recorded ones, so cost and cache assertions run
+# offline and give the same result every time. `match: strict` (the default)
+# also checks that each request is the one that was recorded: a changed prompt
+# or system fails the test. Record again with `orkestra test --record`.
+kind: orkestra/test/mock/http
+name: mock_llm_cassette
+spec:
+  request:
+    method: POST
+    target: /v1/messages
+  cassette: cassettes/conversation.yaml
+
+---
+kind: orkestra/test/workflow
+name: test_recorded_conversation
+spec:
+  input: |
+    {"question": "What is the capital of France?"}
+  phases:
+    - name: chat
+      mocks: [mock_llm_cassette]
+      expectations:
+        - type: equal
+          expected: ["llm", "llm"]
+          actual: '[.trajectory[].type]'
+          failure: "two model calls and nothing else"
+        - type: equal
+          expected: ["ask", "translate"]
+          actual: '[.trajectory[].step]'
+          failure: "ask, then translate"
+        - type: equal
+          expected: 2
+          actual: .usage.turns
+          failure: "two billed calls"
+        - type: equal
+          expected: 600
+          actual: .usage.cache_read_tokens
+          failure: "the second call reads the prefix the first one wrote"
+        - type: equal
+          expected: 0.001718
+          actual: .usage.cost_usd
+          failure: "20 in + 600 cache write + 3 out, then 14 in + 600 cache read + 6 out, at Sonnet 5.5 prices"
+        - type: equal
+          expected: 0
+          actual: .usage.unpriced_turns
+          failure: "the model has a known price"

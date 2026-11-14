@@ -1,0 +1,88 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+# Locally the children run one at a time, in item order, so `responses:`
+# answers city N with entry N.
+---
+kind: orkestra/test/mock/http
+name: mock_weather
+spec:
+  request:
+    method: GET
+    target: /forecast
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"city": "Paris", "temp": 14}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"city": "Lyon", "temp": 17}
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"city": "Nice", "temp": 19}
+
+---
+kind: orkestra/test/mock/http
+name: mock_weather_lyon_down
+spec:
+  request:
+    method: GET
+    target: /forecast
+  responses:
+    - code: 200
+      headers:
+        - content-type: application/json
+      body: |
+        {"city": "Paris", "temp": 14}
+    - code: 503
+      headers:
+        - content-type: text/plain
+      body: |
+        "unavailable"
+
+---
+kind: orkestra/test/workflow
+name: test_forecasts_are_joined_in_item_order
+spec:
+  input: '{"cities": ["Paris", "Lyon", "Nice"]}'
+  phases:
+    - name: fetch
+      mocks: [mock_weather]
+      expectations:
+        - type: equal
+          expected: {cities: [Paris, Lyon, Nice], max_temp: 19}
+          actual: .steps.report
+          failure: "the report reads the joined output, in item order"
+        - type: equal
+          expected: [{branch: "0", status: completed}, {branch: "1", status: completed}, {branch: "2", status: completed}]
+          actual: '[.tasks[] | select(.parent_id != null) | {branch, status}]'
+          failure: "one child task per city"
+        - type: equal
+          expected: ["forecasts", "report"]
+          actual: '[.history[].step]'
+          failure: "history holds the top-level tasks only"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+
+---
+kind: orkestra/test/workflow
+name: test_a_failed_city_fails_the_step
+spec:
+  input: '{"cities": ["Paris", "Lyon", "Nice"]}'
+  phases:
+    - name: fetch
+      mocks: [mock_weather_lyon_down]
+      expectations:
+        - type: equal
+          expected: {failed_item: 1, cause: http, status: 503}
+          actual: .steps.report_failure
+          failure: "the step fails with _error.type branch for the failed city"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "the failure transition handled the step"

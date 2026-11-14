@@ -15,6 +15,20 @@ spec:
 
 ---
 kind: orkestra/test/mock/http
+name: mock_slack_down
+spec:
+  request:
+    method: POST
+    target: /services/T000/B000/XXXX
+  response:
+    code: 503
+    headers:
+      - content-type: text/plain
+    body: |
+      "unavailable"
+
+---
+kind: orkestra/test/mock/http
 name: mock_result
 spec:
   request:
@@ -45,3 +59,34 @@ spec:
           expected: 200
           actual: .steps.record_status.status_code
           failure: "status should be recorded"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "the run should complete"
+        - type: equal
+          expected: 200
+          actual: .run.result.status_code
+          failure: "the run result is the output of record_status, the last step"
+
+---
+kind: orkestra/test/workflow
+name: test_slack_error_is_recorded
+spec:
+  input: |
+    {"text": "Deploy finished", "channel": "#ops"}
+  phases:
+    - name: post
+      mocks: [mock_slack_down, mock_result]
+      expectations:
+        - type: equal
+          expected: {"type": "http", "status_code": 503, "step": "post_to_slack"}
+          actual: '.tasks[0].output._error | del(.task_id)'
+          failure: "the failed step should carry a structured _error"
+        - type: equal
+          expected: ["post_to_slack", "record_failure"]
+          actual: '[.tasks[].step]'
+          failure: "the HTTP error should route to record_failure"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "a failure the workflow handled does not fail the run"

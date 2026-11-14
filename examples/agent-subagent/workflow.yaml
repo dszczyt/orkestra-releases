@@ -1,0 +1,57 @@
+# Input: {"question": "Who designed the Eiffel Tower, and when was it built?"}
+# Needs ORKESTRA_LLM_API_KEY in the environment (expanded only for local files).
+#
+# A lead agent whose tool is another agent. `workflow:` runs a child workflow as
+# the tool call: the child's final output is the tool result. The child run's
+# model calls count against the lead agent's budget, at any depth, so a
+# sub-agent cannot spend what its caller was never given.
+kind: orkestra/secret
+name: llm
+spec:
+  api_key: ${ORKESTRA_LLM_API_KEY}
+
+---
+kind: orkestra/auth/api_key
+name: llm_auth
+spec: {secret: llm, in: header, key_name: x-api-key}
+
+---
+kind: orkestra/workflow
+name: lead
+spec:
+  description: 'Answers a question by delegating research to a sub-agent. Input: {"question": "..."}'
+  initial_step: lead
+  input: .
+
+---
+kind: orkestra/agent
+name: lead
+spec:
+  provider: anthropic
+  auth: llm_auth
+  model: claude-sonnet-5-5
+  max_tokens: 1024
+  system: You answer questions. Delegate research to the researcher tool, then answer from what it returns.
+  prompt: .input.question
+  # The turns of the sub-agent count too: four is the lead's own turns plus the
+  # researcher's.
+  budget: {turns: 4, on_exhausted: gave_up}
+  tools:
+    research:
+      description: Ask a research sub-agent about a topic. It looks things up and returns its findings.
+      input_schema: {type: object, properties: {topic: {type: string}}, required: [topic]}
+      workflow: ./researcher/workflow.yaml
+      # The child's final output is the researcher's last model call; the lead
+      # only needs its text, so the rest does not cost tokens.
+      result: .text
+
+---
+kind: orkestra/operation/pass
+name: gave_up
+spec:
+  output: '{text: "I could not finish within my turn budget."}'
+
+---
+kind: orkestra/step
+name: gave_up
+spec: {operation: gave_up}

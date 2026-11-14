@@ -1,0 +1,125 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+# The test clock is virtual: the 10m cool-down completes at once, and
+# advance_clock moves time past the 48h approval timeout.
+---
+kind: orkestra/test/mock/http
+name: mock_slack
+spec:
+  request:
+    method: POST
+    target: /services/T000/B000/XXXX
+  response:
+    code: 200
+    headers:
+      - content-type: text/plain
+    body: |
+      "ok"
+
+---
+kind: orkestra/test/mock/http
+name: mock_ship
+spec:
+  request:
+    method: POST
+    target: /orders
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"shipped": true}
+
+---
+kind: orkestra/test/mock/http
+name: mock_escalate
+spec:
+  request:
+    method: POST
+    target: /escalate
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"paged": true}
+
+---
+kind: orkestra/test/workflow
+name: test_approval_then_ship
+spec:
+  input: '{"order_id": "A-1042"}'
+  phases:
+    - name: ask
+      mocks: [mock_slack]
+      expectations:
+        - type: equal
+          expected: "signal"
+          actual: '.tasks[-1].waiting_for'
+          failure: "the run should park on the approval"
+        - type: equal
+          expected: "running"
+          actual: .run.status
+          failure: "a parked run stays running"
+    - name: approve
+      mocks: [mock_ship]
+      signals:
+        - name: approval
+          key: A-1042
+          payload: {approved: true, by: jane}
+      expectations:
+        - type: equal
+          expected: {approved: true, by: jane}
+          actual: .steps.wait_approval
+          failure: "the wait's output is the signal payload"
+        - type: equal
+          expected: ["ask_manager", "wait_approval", "decide", "cool_down", "ship"]
+          actual: '[.tasks[].step]'
+          failure: "approved: decide, cool down, ship"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+
+---
+kind: orkestra/test/workflow
+name: test_signal_for_another_order_is_ignored
+spec:
+  input: '{"order_id": "A-1042"}'
+  phases:
+    - name: ask
+      mocks: [mock_slack]
+    - name: wrong_key
+      signals:
+        - name: approval
+          key: B-7
+          payload: {approved: true}
+      expectations:
+        - type: equal
+          expected: "signal"
+          actual: '.tasks[-1].waiting_for'
+          failure: "a signal for another key leaves the wait parked"
+
+---
+kind: orkestra/test/workflow
+name: test_approval_times_out
+spec:
+  input: '{"order_id": "A-1042"}'
+  phases:
+    - name: ask
+      mocks: [mock_slack]
+    - name: two_days_later
+      flags:
+        advance_clock: 49h
+      mocks: [mock_escalate]
+      expectations:
+        - type: equal
+          expected: "timeout"
+          actual: '[.history[] | select(.step == "wait_approval")][0].output._error.type'
+          failure: "an unanswered approval fails with a timeout"
+        - type: equal
+          expected: 200
+          actual: .steps.escalate.status_code
+          failure: "the timeout is escalated"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "a handled timeout does not fail the run"

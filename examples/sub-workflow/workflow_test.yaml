@@ -1,0 +1,89 @@
+# Run: orkestra test workflow.yaml workflow_test.yaml
+# The child run executes in process, against the same mocks.
+---
+kind: orkestra/test/mock/http
+name: mock_scoring
+spec:
+  request:
+    method: POST
+    target: /score
+  response:
+    code: 200
+    headers:
+      - content-type: application/json
+    body: |
+      {"score": 82}
+
+---
+kind: orkestra/test/mock/http
+name: mock_scoring_down
+spec:
+  request:
+    method: POST
+    target: /score
+  response:
+    code: 503
+    headers:
+      - content-type: text/plain
+    body: |
+      "unavailable"
+
+---
+kind: orkestra/test/mock/http
+name: mock_crm
+spec:
+  request:
+    method: POST
+    target: /leads
+  response:
+    code: 201
+    headers:
+      - content-type: application/json
+    body: |
+      {"saved": true}
+
+---
+kind: orkestra/test/workflow
+name: test_lead_is_scored_by_the_child_run
+spec:
+  input: '{"lead": {"email": "jane@example.com"}}'
+  phases:
+    - name: intake
+      mocks: [mock_scoring, mock_crm]
+      expectations:
+        - type: equal
+          expected: {score: 82, tier: hot}
+          actual: .steps.score
+          failure: "the step's output is the child run's result"
+        - type: equal
+          expected: [{status: completed, result: {score: 82, tier: hot}}]
+          actual: '[.runs[] | {status, result}]'
+          failure: "one child run, completed"
+        - type: equal
+          expected: ["score", "save_lead"]
+          actual: '[.history[].step]'
+          failure: "history holds the root run's steps only"
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+
+---
+kind: orkestra/test/workflow
+name: test_failed_child_run_is_routed
+spec:
+  input: '{"lead": {"email": "jane@example.com"}}'
+  phases:
+    - name: intake
+      mocks: [mock_scoring_down]
+      expectations:
+        - type: equal
+          expected: {tier: unscored, reason: child_run, child_status: failed}
+          actual: .steps.unscored
+          failure: "a failed child run fails the step with _error.type child_run"
+        - type: equal
+          expected: "failed"
+          actual: '.runs[0].status'
+        - type: equal
+          expected: "completed"
+          actual: .run.status
+          failure: "the parent handled the failure"

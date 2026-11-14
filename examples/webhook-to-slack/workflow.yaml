@@ -36,6 +36,18 @@ spec:
     {"slack_status": task("post_to_slack").output.status_code, "channel": .input.channel}
 
 ---
+kind: orkestra/operation/http
+name: record_failure
+spec:
+  method: POST
+  url: |
+    .globals.result_webhook
+  # The failed step's output carries a structured _error next to
+  # _executor_error: {type, status_code, step, task_id}.
+  body: |
+    {"slack_error": .input._error, "channel": task("post_to_slack").input.channel}
+
+---
 kind: orkestra/step
 name: post_to_slack
 spec:
@@ -48,11 +60,29 @@ spec:
   operation: record_status
 
 ---
+kind: orkestra/step
+name: record_failure
+spec:
+  operation: record_failure
+
+---
 kind: orkestra/transition
 name: posted
 spec:
   from: post_to_slack
   to: record_status
+
+---
+kind: orkestra/transition
+name: slack_failed
+spec:
+  from: post_to_slack
+  status: failed
+  # Route on the error type: a Slack HTTP error is recorded, so the run
+  # still completes. Any other failure stays unhandled and fails the run.
+  on: |
+    .input._error.type == "http"
+  to: record_failure
 
 ---
 kind: orkestra/transition

@@ -4,9 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/dszczyt/orkestra-releases/blob/main/LICENSE)
 [![Go 1.27+](https://img.shields.io/badge/go-1.27%2B-00ADD8)](https://go.dev)
 
-Deterministic workflow orchestration on PostgreSQL alone: declarative YAML, every run pinned to a commit and replayable, started from the CLI or the HTTP API, on a cron schedule, or by firing a trigger. Self-hosted, MIT licensed.
+Deterministic workflow orchestration on PostgreSQL alone: declarative YAML, every run pinned to a version and replayable, started from the CLI, the HTTP API, MCP, a cron schedule or a trigger. It runs HTTP calls, LLM calls and tool-using agents with budgets and human approval. Self-hosted, MIT licensed.
 
-Status: v0.2.0-alpha.6 (prerelease). Expect rough edges and breaking changes before 1.0.
+Status: v0.2.0-alpha.7 (prerelease). Expect rough edges and breaking changes before 1.0.
 
 ---
 
@@ -17,7 +17,7 @@ Status: v0.2.0-alpha.6 (prerelease). Expect rough edges and breaking changes bef
 brew install dszczyt/tap/orkestra
 
 # Container image (server and worker), tagged by release, for example
-docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.6
+docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.7
 ```
 
 Prebuilt binaries for Linux, macOS and Windows are on the [releases page](https://github.com/dszczyt/orkestra-releases/releases). Download the archive for your platform, extract it and put `orkestra` on your `PATH`.
@@ -183,8 +183,14 @@ Global flags: `--context <path>` (context file), `--config <file>` (default `$HO
 | `orkestra worker` | Run a worker that executes pending and incoming tasks |
 | `orkestra migrate` | Apply pending database migrations |
 | `orkestra users create <email>` | Create a user account (bootstrap) |
-| `orkestra keys create\|list\|revoke` | Manage API keys |
+| `orkestra keys create\|list\|revoke` | Manage API keys (`--scope runs:approve` lets a key approve an agent's tool calls) |
+| `orkestra compile <workflow>` | Print the workflow with every `orkestra/agent` expanded into plain resources |
+| `orkestra fork` | Fork a local run at a task into a new context file |
+| `orkestra replay` | Re-evaluate a local run offline against its workflow |
+| `orkestra signal` | Send a signal to a local run |
+| `orkestra prune --older-than <30d>` | Delete finished runs |
 | `orkestra mcp serve` | Serve Orkestra as an MCP server over stdio: run any workflow, read stored runs |
+| `orkestra mcp pin <workflow>` | List the tools of the MCP servers a workflow declares and write them into the file (`--check` for CI) |
 
 Also available: `orkestra describe <workflow>` (structure, `--graph` for an ASCII graph), `orkestra context` (inspect a run's context) and `orkestra auth login <workflow-file> <auth-resource-name>` (OAuth2 authorization code flow in the browser).
 
@@ -206,23 +212,46 @@ orkestra validate workflow.yaml
 orkestra test workflow.yaml workflow_test.yaml
 ```
 
-`validate` takes `--verbose`. With one argument, `test` reads the workflow and its tests from the same file. Flags: `--step`, `--stop-at <phase>`, `--resume-from <phase>`, `--verbose`.
+`validate` takes `--verbose`. With one argument, `test` reads the workflow and its tests from the same file. Flags: `--step`, `--stop-at <phase>`, `--resume-from <phase>`, `--record` (send the requests of cassette mocks to the real host and write the cassette files), `--verbose`. See Recorded test cassettes below.
 
 ### serve, worker, migrate
 
 All three read `ORKESTRA_DATABASE_URL` (a PostgreSQL connection string).
 
-- `serve`: also reads `ORKESTRA_HTTP_ADDR` (default `0.0.0.0:8080`) and `ORKESTRA_AUTO_MIGRATE` (apply migrations at startup when `true`, default off). Exits with code 2 if the database URL is unset.
-- `worker`: connects to PostgreSQL, drains tasks left pending by a crash, then executes tasks as they become due until stopped. Several workers can run against the same database; task claiming prevents double execution.
+- `serve`: also reads `ORKESTRA_HTTP_ADDR` (default `0.0.0.0:8080`) and `ORKESTRA_AUTO_MIGRATE` (apply migrations at startup when `true`, default off). Exits with code 2 if the database URL is unset. Flags: `--allow-mcp-stdio` (accept workflows that declare a stdio MCP server, which starts a command on the host) and `--mcp-allowed-origin <origin>` (repeatable, or `ORKESTRA_MCP_ALLOWED_ORIGINS`, comma separated). It also serves MCP over HTTP at `POST /mcp` and the trigger ingress at `/hooks/{name}`.
+- `worker`: connects to PostgreSQL and executes tasks as they become due until stopped. Several workers can share a database; they claim tasks with `FOR UPDATE SKIP LOCKED`, up to `ORKESTRA_WORKER_CONCURRENCY` at once (default 16). A task whose worker dies goes back to the queue. Flags: `--event-mode <notify|wal>`, `--allow-mcp-stdio`, `--max-map-items <n>` (default 1000). Other settings: `ORKESTRA_HEARTBEAT_INTERVAL` (default 15s), `ORKESTRA_SHUTDOWN_GRACE` (default 30s).
 - `migrate`: applies the migrations embedded in the binary. Safe to run repeatedly; it prints `Applied <file>` per migration or `Database is up to date`.
+
+Workers wake on a PostgreSQL event, chosen by `ORKESTRA_EVENT_MODE` or `--event-mode`:
+
+- `notify` (default): `LISTEN/NOTIFY`. No replication setup, so the worker does not need `wal_level=logical`. It needs a direct connection: a pooler in transaction mode drops `LISTEN`.
+- `wal`: logical replication on a temporary slot per worker. Needs `wal_level=logical` and a `REPLICATION` role.
+
+The event only wakes workers up. A 30 second fallback poll covers a lost event. Step execution is at least once and completion is exactly once, so make the operations behind your steps idempotent. `POST /v1/runs` accepts an `Idempotency-Key` header. `orkestra worker` and `orkestra serve` no longer use the old shared `orkestra_tasks` replication slot and drop it at startup. A trigger of kind `cdc` still needs `wal_level=logical` on the database it watches.
+
+The worker refuses HTTP steps, MCP `http` servers and OAuth2 token requests to private, loopback or link-local addresses. If your workflows call internal services, set `ORKESTRA_ALLOW_PRIVATE_HTTP=1` on the worker.
 
 ### users and keys
 
 Both need `ORKESTRA_DATABASE_URL`.
 
 - `users create <email>`: bootstrap the first user on a fresh deployment. Later users join through organization invites.
-- `keys create <org-id> [--owner <user-id>]`: creates an organization-wide key, or a personal access token with `--owner`. The token is printed once.
+- `keys create <org-id> [--owner <user-id>] [--scope <scope>] [--label <label>]`: creates an organization-wide key, or a personal access token with `--owner`. The token is printed once. `--scope runs:approve` lets the key approve an agent's tool calls, so leave it off keys you give to agent clients. `--label` (repeatable) lets the key read the steps whose `metadata.access` lists it, over REST and MCP.
 - `keys list <org-id>` and `keys revoke <key-id>`.
+
+### compile, fork, replay, signal
+
+```bash
+orkestra compile workflow.yaml
+orkestra fork --context run.ctx --at <task-id> --out fork.ctx --input '{"city": "Lyon"}'
+orkestra replay --context run.ctx --workflow workflow.yaml
+orkestra signal --context run.ctx --name approval --key A-1042 --payload '{"approved": true}'
+```
+
+- `compile` prints the YAML a run is pinned to. The output is byte-stable and `${VAR}` stays unexpanded. A workflow with no agent is printed as written.
+- `fork` (needs `--at <task-id>` and `--out <file>`) copies the completed top-level tasks before the `--at` task, with their outputs, and continues from a fresh copy of that task. The source run is not modified. `--input` replaces the input of the fork task, `--workflow` forks under another definition. Continue with `orkestra run <workflow> --context <out>`. On a server, use `POST /v1/runs/{run_id}/fork`.
+- `replay` recomputes every transition and input transform from the recorded outputs. No operation runs. It exits 0 when the run follows the workflow, and 1 at the first difference, naming the task. With `--workflow`, the difference marks the task to fork from.
+- `signal` (needs `--name`; `--key`, `--payload` and `--run` are optional) wakes a wait of a local run. Run `orkestra run` again on the same context to continue. On a server, use `POST /v1/runs/{run_id}/signals/{name}`.
 
 ### mcp serve
 
@@ -251,6 +280,60 @@ spec:
 
 Register each agent client with its own key, for example `orkestra mcp serve --key local-llm` for the local model and no key for a cloud assistant. A client whose key is not listed never gets that step's input, output or error text, nor the input or error text of any later task of the run, since restricted data flows into them. Resuming a context requires the workflow of its stored run. Task data is withheld when that workflow cannot be loaded, or is a remote URL whose rules may have changed since the run. This filters what goes through MCP only: an agent that can read the context file on disk is not stopped.
 
+Flags of `mcp serve`: `--root`, `--key`, `--timeout` (maximum duration of one run, default 5m). `orkestra_get_run` also lists the tool calls waiting for approval. An approval is never given through MCP.
+
+### mcp pin
+
+```bash
+orkestra mcp pin workflow.yaml
+orkestra mcp pin --check workflow.yaml
+```
+
+`pin` connects to every `orkestra/mcp/server` of the file (or the one named by `--server`), calls `tools/list` once and writes the protocol revision and the tools into the file. At run time Orkestra never lists tools, so a server cannot add or change a tool under a running agent. A stdio server is started on your machine to be listed. Server annotations such as `readOnlyHint` are untrusted and decide nothing. `--check` writes nothing and exits non-zero when the live list differs from the pinned one, for CI.
+
+---
+
+## Workflow features
+
+Each feature below is a resource in the workflow YAML. `orkestra validate` checks them and `orkestra test` runs them offline.
+
+- **LLM operation** (`orkestra/operation/llm`): a model call through the Anthropic API with `model`, `max_tokens`, `system` and `user` (jq), and optional `effort`, `cache` and `pricing`. The output has `text`, `stop_reason`, `usage` and `cost_usd`. A refusal fails the task with `_error.type` `llm.refusal`. With PostgreSQL, every billed call writes a usage row in the same transaction as the task result. Set the key in `ORKESTRA_LLM_API_KEY` or an `orkestra/secret`.
+- **Conversations**: `conversation: <name>` on LLM operations makes a call see the earlier turns of a run-scoped log, and `tool_results` answers the previous turn's tool calls. Operations that share a conversation must share `provider` and `system`.
+- **Agents** (`orkestra/agent`): a tool-using agent in one resource (`provider`, `auth`, `model`, `prompt`, `budget`, `tools`). The loader expands it into plain steps, transitions, tools and a budget, so nothing is hidden: `orkestra compile` prints the result. Tools can be backed by an `operation`, by an MCP server (`mcp: <server>`), or by another workflow (`workflow: <path>`, a sub-agent whose budget counts against the caller's). Tool calls of one turn run in parallel by default (`parallel_tools`, `max_parallel_tools`).
+- **Budgets** (`orkestra/budget`): limit the tasks of its `steps` by `turns`, `tokens`, `cost_usd` or `wall_clock`. A task over a limit fails without running with `_error.type` `limit`. `on_exhausted: <step>` routes it. `.budget` is available in jq. `orkestra validate` refuses a loop that calls a model unless a budget covers it.
+- **Approvals**: a tool with `approval: required` stops the run until a person answers with the signal `approval`. The sender must hold the `runs:approve` scope (`orkestra keys create --scope runs:approve`). A denial or a timeout (`approval_timeout`, default 1h) gives the model an error result. Locally, answer with `orkestra signal`. On a server, `GET /v1/runs/{id}` lists `pending_approvals` and the answer goes to `POST /v1/runs/{run_id}/signals/approval`. MCP tools must say `approval: none` or `approval: required`.
+- **Map and parallel**: `map` runs a step once per item of a jq array (with `concurrency`), `parallel` runs a fixed list of named branches. The output is the array, or the object keyed by branch name. `on_failure: fail` (default) or `continue` sets what a failed child does. A server caps a map at 1000 items.
+- **Sub-workflows** (`orkestra/operation/workflow`): runs another workflow file as a child run. A failed child fails the step with `_error.type: child_run`. The hash of the parent covers the child files, so a child runs the definition its parent started with.
+- **Timers and signals** (`orkestra/operation/wait`): `duration` is a timer. `signal`, `key` and `timeout` park the run until `POST /v1/runs/{run_id}/signals/{name}` (or `orkestra signal`) arrives.
+- **Failure handling**: a `status: failed` transition routes a failed step. `on_failure: <step>` on the workflow starts a step after the first unhandled failure, for cleanup and notice. `compensate: <step>` on a step undoes it: when the run fails, each completed task gets a compensation task, newest first. The run ends `failed`.
+- **Retries and timeouts**: a step accepts `retry` and `timeout` (default `5m`, per attempt). A retry is stored in the task and survives a restart.
+- **Fork and replay**: `orkestra fork` restarts a run from a task, `orkestra replay` checks a recorded run against a workflow without running anything.
+
+### Recorded test cassettes
+
+An `orkestra/test/mock/http` with `cassette: <file>` replays recorded responses. `orkestra test --record` sends its requests to the real host and writes the file. Request headers are never stored and bodies go through the secret redactor. With `match: strict` (default) a changed request body fails the test, `match: order` ignores the body. A missing cassette is an error and the network is never used on replay. Expectations can read `.trajectory`, `.usage` and `.history`. The test clock is virtual, and a phase can move it with `advance_clock`. `orkestra/test/mock/mcp` stands in for an MCP server.
+
+---
+
+## MCP, both ways
+
+- **Orkestra as an MCP server.** Over stdio, `orkestra mcp serve` runs locally with no server to deploy. Over HTTP, `orkestra serve` answers `POST /mcp` with a bearer API key and the same three tools (`orkestra_run`, `orkestra_get_run`, `orkestra_get_task`). There is no tool that sends a signal, so an agent cannot approve its own tool calls. A browser `Origin` must be allowed with `--mcp-allowed-origin`.
+- **MCP servers as tools.** A workflow declares an `orkestra/mcp/server` (transport `http` or `stdio`), `orkestra mcp pin` writes its tools into the file, and an agent uses them with `mcp: <server>` in its tool list. A stdio server runs a command, so `orkestra serve` and `orkestra worker` refuse it unless started with `--allow-mcp-stdio`.
+
+---
+
+## Triggers
+
+A trigger starts a workflow run from an outside event. Create one with `POST /v1/triggers` (API key) with `name`, `kind`, `workflow` and an optional `config`. The workflow is pinned when the trigger is created. `POST /v1/triggers/{name}/fire` starts a run from a push trigger by hand.
+
+- **Push kinds** wait for `POST /hooks/{name}`, which needs no Orkestra API key: webhook, git, slack, http, grpc, form, phone, sms, otel, log, cli. The trigger authenticates the caller, either with a signature (`webhook` with `secret`, `git` and `slack` with `signing_secret`) or with an `ingress_token` of at least 16 characters, sent in `X-Orkestra-Token`, `Authorization: Bearer` or `?token=`. Any refusal is the same `404`. A `websocket` trigger takes `GET /hooks/{name}/ws` with a required `ingress_token`.
+- **Listener kinds** run inside `orkestra serve`: cron, cdc (PostgreSQL), storage (S3), queue (Kafka, NATS), email (IMAP), mqtt, mongodb, graphql. A listener that stops is restarted with a backoff from 1 second to 1 minute.
+
+Two operator settings on the server apply to listener kinds only:
+
+- `ORKESTRA_TRIGGER_ALLOW_PRIVATE=true` lets listeners connect to private and loopback addresses. By default a trigger config cannot point at the server's own network. Use it only when all tenants are trusted.
+- `ORKESTRA_TRIGGER_ALLOW_INSECURE_TLS=true` lets a trigger config turn TLS verification off or send credentials without TLS.
+
 ---
 
 ## What is new in v0.2
@@ -258,8 +341,16 @@ Register each agent client with its own key, for example `orkestra mcp serve --k
 Compared with v0.1.0 (2026-05-06). See the [release notes](https://github.com/dszczyt/orkestra-releases/releases) for details.
 
 - Web console: runs, triggers, task inspector, step input and output.
-- MCP server: `orkestra mcp serve` lets an agent run any workflow and read its stored runs over stdio, with no server to deploy. Per-step access keys keep sensitive step data away from agents that are not authorized to read it.
-- Trigger resources: the DSL and adapter packages cover 20 kinds (cdc, cli, cron, email, form, git, graphql, grpc, http, log, mongodb, mqtt, otel, phone, queue, slack, sms, storage, webhook, websocket). In the server only `cron` runs on its own; the push kinds (http, webhook, git, slack, grpc, form, phone, sms, otel, log, cli) can be fired with `POST /v1/triggers/{name}/fire`. The eight kinds that need an external provider (cdc, email, graphql, mongodb, mqtt, queue, storage, websocket) are not wired into the server yet and cannot be fired.
+- LLM operation, agents (`orkestra/agent`, `orkestra compile`), conversations, tools and budgets, with usage and cost recorded per call.
+- Approvals for an agent's tool calls, with the `runs:approve` key scope.
+- Recorded test cassettes (`orkestra test --record`), trajectory and usage expectations, a virtual test clock and MCP mocks.
+- `map`, `parallel`, sub-workflows, timers and signals, `on_failure` and compensation.
+- `orkestra fork`, `orkestra replay` and `orkestra signal`.
+- MCP both ways: `orkestra mcp serve` over stdio, `POST /mcp` on the server, and MCP servers as agent tools with `orkestra mcp pin`. Per-step access keys keep sensitive step data away from agents that are not authorized to read it.
+- Triggers: 20 kinds. Push kinds are reachable at `POST /hooks/{name}`, listener kinds run inside the server, and two operator settings (`ORKESTRA_TRIGGER_ALLOW_PRIVATE`, `ORKESTRA_TRIGGER_ALLOW_INSECURE_TLS`) control what a trigger config may reach.
+- Durable server mode: a step's output, status, next task and run close are written in one transaction. Step execution is at least once, completion exactly once. Several workers can share a database. A task whose worker dies is requeued, and retries survive a restart.
+- The worker no longer needs `wal_level=logical`: the default event mode is `notify`, and `wal` is optional.
+- The worker refuses HTTP calls to private addresses unless `ORKESTRA_ALLOW_PRIVATE_HTTP=1`.
 - Multi-organization auth: users, sessions, organizations, memberships, invites, org-shared API keys and personal access tokens.
 - Distributed worker with heartbeat and a stale-task reaper.
 - Authentication resources for HTTP operations: `orkestra/secret`, `orkestra/auth/bearer`, `basic`, `api_key`, OAuth2 client credentials and authorization code.
