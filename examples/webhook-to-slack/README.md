@@ -26,7 +26,7 @@ orkestra test workflow.yaml workflow_test.yaml
 
 The test mocks every HTTP call, so it needs no network.
 
-The workflow file also declares an `orkestra/trigger` document named `on_message` (kind `http`). The http trigger adapter takes no config keys. Its `workflow` field is loaded as a path or URL by the server, so point it at your own copy if you self-host. Once the trigger is registered on a server, fire it with:
+The workflow file also declares an `orkestra/trigger/http` document named `on_message`. The http trigger adapter takes no config keys. Its `workflow` field is loaded as a path or URL by the server, so point it at your own copy if you self-host. Once the trigger is registered on a server, fire it with:
 
 ```
 curl -X POST http://localhost:8080/v1/triggers/on_message/fire \

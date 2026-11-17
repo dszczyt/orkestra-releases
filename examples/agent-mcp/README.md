@@ -10,7 +10,7 @@ The `url` in `workflow.yaml` is a placeholder. Point it at your server, then:
 orkestra mcp pin workflow.yaml
 ```
 
-This connects once, calls `tools/list`, and writes the protocol revision and the tools into the `orkestra/mcp/server` resource. Review the change like any other. At run time Orkestra never lists tools, so a server cannot add or redefine a tool under a running agent, and `orkestra validate` can name every callable tool offline. In CI, `orkestra mcp pin --check workflow.yaml` exits non-zero when the live list differs from the pinned one.
+This connects once, calls `tools/list`, and writes the protocol revision and the tools into the `orkestra/mcp/server/<transport>` resource. Review the change like any other. At run time Orkestra never lists tools, so a server cannot add or redefine a tool under a running agent, and `orkestra validate` can name every callable tool offline. In CI, `orkestra mcp pin --check workflow.yaml` exits non-zero when the live list differs from the pinned one.
 
 Server annotations such as `readOnlyHint` are untrusted. They appear as comments above each pinned tool and decide nothing.
 
@@ -23,8 +23,8 @@ Every MCP tool an agent uses says `approval: none` or `approval: required`; ther
 A server can also be a local process:
 
 ```yaml
+kind: orkestra/mcp/server/stdio
 spec:
-  transport: stdio
   command: [npx, -y, "@modelcontextprotocol/server-filesystem", /data]
   env:
     API_TOKEN: {secret: fs, key: token}

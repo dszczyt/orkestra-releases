@@ -24,10 +24,9 @@ spec:
   input: .
 
 ---
-kind: orkestra/mcp/server
+kind: orkestra/mcp/server/http
 name: docs
 spec:
-  transport: http
   url: https://docs-mcp.example.com/mcp
   protocol: "2026-07-28"
   tools:

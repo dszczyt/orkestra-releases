@@ -6,7 +6,7 @@
 
 Deterministic workflow orchestration on PostgreSQL alone: declarative YAML, every run pinned to a version and replayable, started from the CLI, the HTTP API, MCP, a cron schedule or a trigger. It runs HTTP calls, LLM calls and tool-using agents with budgets and human approval. Self-hosted, MIT licensed.
 
-Status: v0.2.0-alpha.7 (prerelease). Expect rough edges and breaking changes before 1.0.
+Status: v0.2.0-alpha.8 (prerelease). Expect rough edges and breaking changes before 1.0.
 
 ---
 
@@ -17,7 +17,7 @@ Status: v0.2.0-alpha.7 (prerelease). Expect rough edges and breaking changes bef
 brew install dszczyt/tap/orkestra
 
 # Container image (server and worker), tagged by release, for example
-docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.7
+docker pull ghcr.io/dszczyt/orkestra:v0.2.0-alpha.8
 ```
 
 Prebuilt binaries for Linux, macOS and Windows are on the [releases page](https://github.com/dszczyt/orkestra-releases/releases). Download the archive for your platform, extract it and put `orkestra` on your `PATH`.
@@ -227,7 +227,7 @@ Workers wake on a PostgreSQL event, chosen by `ORKESTRA_EVENT_MODE` or `--event-
 - `notify` (default): `LISTEN/NOTIFY`. No replication setup, so the worker does not need `wal_level=logical`. It needs a direct connection: a pooler in transaction mode drops `LISTEN`.
 - `wal`: logical replication on a temporary slot per worker. Needs `wal_level=logical` and a `REPLICATION` role.
 
-The event only wakes workers up. A 30 second fallback poll covers a lost event. Step execution is at least once and completion is exactly once, so make the operations behind your steps idempotent. `POST /v1/runs` accepts an `Idempotency-Key` header. `orkestra worker` and `orkestra serve` no longer use the old shared `orkestra_tasks` replication slot and drop it at startup. A trigger of kind `cdc` still needs `wal_level=logical` on the database it watches.
+The event only wakes workers up. A 30 second fallback poll covers a lost event. Step execution is at least once and completion is exactly once, so make the operations behind your steps idempotent. `POST /v1/runs` accepts an `Idempotency-Key` header. `orkestra worker` and `orkestra serve` no longer use the old shared `orkestra_tasks` replication slot and drop it at startup. A trigger of kind `cdc/postgres` still needs `wal_level=logical` on the database it watches.
 
 The worker refuses HTTP steps, MCP `http` servers and OAuth2 token requests to private, loopback or link-local addresses. If your workflows call internal services, set `ORKESTRA_ALLOW_PRIVATE_HTTP=1` on the worker.
 
@@ -289,7 +289,7 @@ orkestra mcp pin workflow.yaml
 orkestra mcp pin --check workflow.yaml
 ```
 
-`pin` connects to every `orkestra/mcp/server` of the file (or the one named by `--server`), calls `tools/list` once and writes the protocol revision and the tools into the file. At run time Orkestra never lists tools, so a server cannot add or change a tool under a running agent. A stdio server is started on your machine to be listed. Server annotations such as `readOnlyHint` are untrusted and decide nothing. `--check` writes nothing and exits non-zero when the live list differs from the pinned one, for CI.
+`pin` connects to every `orkestra/mcp/server/<transport>` of the file (or the one named by `--server`), calls `tools/list` once and writes the protocol revision and the tools into the file. At run time Orkestra never lists tools, so a server cannot add or change a tool under a running agent. A stdio server is started on your machine to be listed. Server annotations such as `readOnlyHint` are untrusted and decide nothing. `--check` writes nothing and exits non-zero when the live list differs from the pinned one, for CI.
 
 ---
 
@@ -297,14 +297,16 @@ orkestra mcp pin --check workflow.yaml
 
 Each feature below is a resource in the workflow YAML. `orkestra validate` checks them and `orkestra test` runs them offline.
 
-- **LLM operation** (`orkestra/operation/llm`): a model call through the Anthropic API with `model`, `max_tokens`, `system` and `user` (jq), and optional `effort`, `cache` and `pricing`. The output has `text`, `stop_reason`, `usage` and `cost_usd`. A refusal fails the task with `_error.type` `llm.refusal`. With PostgreSQL, every billed call writes a usage row in the same transaction as the task result. Set the key in `ORKESTRA_LLM_API_KEY` or an `orkestra/secret`.
-- **Conversations**: `conversation: <name>` on LLM operations makes a call see the earlier turns of a run-scoped log, and `tool_results` answers the previous turn's tool calls. Operations that share a conversation must share `provider` and `system`.
+- **LLM operation** (`orkestra/operation/llm/anthropic`): a model call through the Anthropic API with `model`, `max_tokens`, `system` and `user` (jq), and optional `effort`, `cache`, `pricing` and `images` (jq, base64 images). The output has `text`, `stop_reason`, `usage` and `cost_usd`. A refusal fails the task with `_error.type` `llm.refusal`. With PostgreSQL, every billed call writes a usage row in the same transaction as the task result. Set the key in `ORKESTRA_LLM_API_KEY` or an `orkestra/secret`.
+- **Conversations**: `conversation: <name>` on LLM operations makes a call see the earlier turns of a run-scoped log, and `tool_results` answers the previous turn's tool calls. Operations that share a conversation must share the provider (the kind) and `system`.
 - **Agents** (`orkestra/agent`): a tool-using agent in one resource (`provider`, `auth`, `model`, `prompt`, `budget`, `tools`). The loader expands it into plain steps, transitions, tools and a budget, so nothing is hidden: `orkestra compile` prints the result. Tools can be backed by an `operation`, by an MCP server (`mcp: <server>`), or by another workflow (`workflow: <path>`, a sub-agent whose budget counts against the caller's). Tool calls of one turn run in parallel by default (`parallel_tools`, `max_parallel_tools`).
 - **Budgets** (`orkestra/budget`): limit the tasks of its `steps` by `turns`, `tokens`, `cost_usd` or `wall_clock`. A task over a limit fails without running with `_error.type` `limit`. `on_exhausted: <step>` routes it. `.budget` is available in jq. `orkestra validate` refuses a loop that calls a model unless a budget covers it.
 - **Approvals**: a tool with `approval: required` stops the run until a person answers with the signal `approval`. The sender must hold the `runs:approve` scope (`orkestra keys create --scope runs:approve`). A denial or a timeout (`approval_timeout`, default 1h) gives the model an error result. Locally, answer with `orkestra signal`. On a server, `GET /v1/runs/{id}` lists `pending_approvals` and the answer goes to `POST /v1/runs/{run_id}/signals/approval`. MCP tools must say `approval: none` or `approval: required`.
 - **Map and parallel**: `map` runs a step once per item of a jq array (with `concurrency`), `parallel` runs a fixed list of named branches. The output is the array, or the object keyed by branch name. `on_failure: fail` (default) or `continue` sets what a failed child does. A server caps a map at 1000 items.
 - **Sub-workflows** (`orkestra/operation/workflow`): runs another workflow file as a child run. A failed child fails the step with `_error.type: child_run`. The hash of the parent covers the child files, so a child runs the definition its parent started with.
 - **Timers and signals** (`orkestra/operation/wait`): `duration` is a timer. `signal`, `key` and `timeout` park the run until `POST /v1/runs/{run_id}/signals/{name}` (or `orkestra signal`) arrives.
+- **Kafka operation** (`orkestra/operation/queue/kafka`): produces the `records` of its input and succeeds when Kafka acked all of them. Retriable Kafka errors are retried by the step's `retry`. A retry can produce a record twice. The producer is idempotent and uses `acks=all`. SASL without TLS is refused unless `ORKESTRA_TRIGGER_ALLOW_INSECURE_TLS=true`.
+- **Lanes**: runs of one lane execute one at a time, in creation order, and a failed run keeps its lane until it is forked, released (`POST /v1/runs/{id}/release-lane`) or cancelled. A lane takes at most 1000 waiting runs, then creating one more fails. A `cdc/postgres` trigger puts its runs in one lane, or spreads them over `lanes` lanes by key.
 - **Failure handling**: a `status: failed` transition routes a failed step. `on_failure: <step>` on the workflow starts a step after the first unhandled failure, for cleanup and notice. `compensate: <step>` on a step undoes it: when the run fails, each completed task gets a compensation task, newest first. The run ends `failed`.
 - **Retries and timeouts**: a step accepts `retry` and `timeout` (default `5m`, per attempt). A retry is stored in the task and survives a restart.
 - **Fork and replay**: `orkestra fork` restarts a run from a task, `orkestra replay` checks a recorded run against a workflow without running anything.
@@ -318,21 +320,50 @@ An `orkestra/test/mock/http` with `cassette: <file>` replays recorded responses.
 ## MCP, both ways
 
 - **Orkestra as an MCP server.** Over stdio, `orkestra mcp serve` runs locally with no server to deploy. Over HTTP, `orkestra serve` answers `POST /mcp` with a bearer API key and the same three tools (`orkestra_run`, `orkestra_get_run`, `orkestra_get_task`). There is no tool that sends a signal, so an agent cannot approve its own tool calls. A browser `Origin` must be allowed with `--mcp-allowed-origin`.
-- **MCP servers as tools.** A workflow declares an `orkestra/mcp/server` (transport `http` or `stdio`), `orkestra mcp pin` writes its tools into the file, and an agent uses them with `mcp: <server>` in its tool list. A stdio server runs a command, so `orkestra serve` and `orkestra worker` refuse it unless started with `--allow-mcp-stdio`.
+- **MCP servers as tools.** A workflow declares an `orkestra/mcp/server/http` or `orkestra/mcp/server/stdio`, `orkestra mcp pin` writes its tools into the file, and an agent uses them with `mcp: <server>` in its tool list. A stdio server runs a command, so `orkestra serve` and `orkestra worker` refuse it unless started with `--allow-mcp-stdio`.
 
 ---
 
 ## Triggers
 
-A trigger starts a workflow run from an outside event. Create one with `POST /v1/triggers` (API key) with `name`, `kind`, `workflow` and an optional `config`. The workflow is pinned when the trigger is created. `POST /v1/triggers/{name}/fire` starts a run from a push trigger by hand.
+A trigger starts a workflow run from an outside event. In a workflow file the kind is part of the document kind, for example `kind: orkestra/trigger/queue/kafka`. A bare `orkestra/trigger` or a `spec.kind` field is refused, and so is a `provider` key in `config`. Create one on a server with `POST /v1/triggers` (API key) with `name`, `kind`, `workflow` and an optional `config`. The workflow is pinned when the trigger is created. `POST /v1/triggers/{name}/fire` starts a run from a push trigger by hand.
 
-- **Push kinds** wait for `POST /hooks/{name}`, which needs no Orkestra API key: webhook, git, slack, http, grpc, form, phone, sms, otel, log, cli. The trigger authenticates the caller, either with a signature (`webhook` with `secret`, `git` and `slack` with `signing_secret`) or with an `ingress_token` of at least 16 characters, sent in `X-Orkestra-Token`, `Authorization: Bearer` or `?token=`. Any refusal is the same `404`. A `websocket` trigger takes `GET /hooks/{name}/ws` with a required `ingress_token`.
-- **Listener kinds** run inside `orkestra serve`: cron, cdc (PostgreSQL), storage (S3), queue (Kafka, NATS), email (IMAP), mqtt, mongodb, graphql. A listener that stops is restarted with a backoff from 1 second to 1 minute.
+- **Push kinds** wait for `POST /hooks/{name}`, which needs no Orkestra API key: `webhook`, `git/github` (also `git/gitlab`, `git/bitbucket`, `git/gitea`), `slack`, `http`, `grpc`, `form`, `phone/twilio`, `sms/twilio`, `otel`, `log/datadog` (also `log/loki`, `log/elastic`, `log/splunk`, `log/generic`), `cli`. The trigger authenticates the caller, either with a signature (`webhook` with `secret`, `git/*` and `slack` with `signing_secret`) or with an `ingress_token` of at least 16 characters, sent in `X-Orkestra-Token`, `Authorization: Bearer` or `?token=`. Any refusal is the same `404`. A `websocket` trigger takes `GET /hooks/{name}/ws` with a required `ingress_token`.
+- **Listener kinds** run inside `orkestra serve`: `cron`, `cdc/postgres`, `storage/s3`, `queue/kafka`, `queue/nats`, `email/imap`, `mqtt`, `mongodb`, `graphql`. A listener that stops is restarted with a backoff from 1 second to 1 minute.
+
+With several `orkestra serve` replicas, one replica listens for each listener trigger. It holds a PostgreSQL advisory lock named after the trigger, so a cron fires once per tick and a CDC slot has one reader. A standby takes over within about 7 seconds after the holder stops. During a handover two replicas can listen for about 3 seconds: cron is still deduplicated per tick, Kafka and NATS groups share the work, and the other kinds can start a duplicate run for one event. A cron tick due during a handover is lost, because cron does not catch up. The lock needs a session connection, so PgBouncer in transaction mode breaks it.
+
+Delivery of listener events: a `cdc/postgres` event is acknowledged once its run is stored, and creation is retried with a backoff while it fails, so the replication position never moves past a change that has no run. The other listener kinds are acknowledged when the event reaches the dispatcher, before the run row is written.
 
 Two operator settings on the server apply to listener kinds only:
 
 - `ORKESTRA_TRIGGER_ALLOW_PRIVATE=true` lets listeners connect to private and loopback addresses. By default a trigger config cannot point at the server's own network. Use it only when all tenants are trusted.
 - `ORKESTRA_TRIGGER_ALLOW_INSECURE_TLS=true` lets a trigger config turn TLS verification off or send credentials without TLS.
+
+### Postgres CDC to Kafka
+
+A `cdc/postgres` trigger reads row changes with logical replication and starts a run per batch of changes. Paired with `orkestra/operation/queue/kafka`, it replaces a Debezium setup with a workflow: changes reach Kafka without loss, in order per key, as Debezium shaped records.
+
+```yaml
+kind: orkestra/trigger/cdc/postgres
+name: orders-cdc
+spec:
+  workflow: cdc-to-kafka/workflow.yaml
+  config:
+    dsn: postgres://orkestra_cdc:change-me@db.example.com:5432/app?sslmode=verify-full
+    manage: true
+    tables: ["public.orders"]
+    batch:
+      max_changes: 500
+      max_wait: 200ms
+    lanes: 4
+```
+
+- **Batches.** The `batch.*` keys group changes into one run per batch. Each change carries `key` (the primary key), `xid`, `commit_ts` and `commit_lsn`.
+- **No loss.** The replication slot moves only after every batch of a transaction is stored as a run. A replay cut differently gives duplicates, never a skip.
+- **Order.** `lanes` (1 to 256, default 1) spreads changes over lanes, and `lane_key` (`key` default, `table`, `none`) picks the lane. Runs of a lane execute one at a time. `on_failure: block` (default) keeps a failed run in its lane until you fork it, release it with `POST /v1/runs/{id}/release-lane`, or cancel it. `on_failure: continue` lets the next run start, and order is lost after a failure.
+- **Incremental snapshot.** `snapshot: initial` publishes the rows already in the tables as `read` changes, then keeps streaming, with order per key kept. The snapshot is resumable and holds no long transaction on the source. `snapshot_chunk_size` defaults to 256. Request one at any time with `POST /v1/triggers/{name}/snapshot` and `{"tables": ["public.orders"]}` (an empty list means every published table), and read progress with `GET /v1/triggers/{name}/snapshot`. It needs PostgreSQL 14 or later.
+- **Managed publication and slot.** With `manage: true`, Orkestra creates the publication and the replication slot on the source and drops them some seconds after the trigger is deleted, so a forgotten slot cannot fill the disk with WAL. It never adopts a slot or publication it did not create. `GET /v1/cdc/cleanups` lists pending cleanups and `DELETE /v1/cdc/cleanups/{id}` abandons one. The role needs `REPLICATION`, `SELECT`, `CREATE` on the database, and membership in the role that owns the tables.
 
 ---
 
@@ -347,7 +378,11 @@ Compared with v0.1.0 (2026-05-06). See the [release notes](https://github.com/ds
 - `map`, `parallel`, sub-workflows, timers and signals, `on_failure` and compensation.
 - `orkestra fork`, `orkestra replay` and `orkestra signal`.
 - MCP both ways: `orkestra mcp serve` over stdio, `POST /mcp` on the server, and MCP servers as agent tools with `orkestra mcp pin`. Per-step access keys keep sensitive step data away from agents that are not authorized to read it.
-- Triggers: 20 kinds. Push kinds are reachable at `POST /hooks/{name}`, listener kinds run inside the server, and two operator settings (`ORKESTRA_TRIGGER_ALLOW_PRIVATE`, `ORKESTRA_TRIGGER_ALLOW_INSECURE_TLS`) control what a trigger config may reach.
+- Triggers: push kinds are reachable at `POST /hooks/{name}`, listener kinds run inside the server, the provider is part of the kind (`orkestra/trigger/queue/kafka`, `orkestra/operation/llm/anthropic`, `orkestra/mcp/server/stdio`), and two operator settings (`ORKESTRA_TRIGGER_ALLOW_PRIVATE`, `ORKESTRA_TRIGGER_ALLOW_INSECURE_TLS`) control what a trigger config may reach.
+- One listener per trigger across `serve` replicas, and cron deduplicated per tick. Listener events are acknowledged once the run is stored, for `cdc/postgres`.
+- Lanes: runs of one lane execute in order, one at a time, with `POST /v1/runs/{id}/release-lane` to free a blocked lane.
+- Postgres CDC to Kafka: `cdc/postgres` with batches, lanes by key, incremental snapshot (`POST /v1/triggers/{name}/snapshot`) and `manage: true` for the publication and slot, plus the `orkestra/operation/queue/kafka` operation.
+- Images on LLM operations: `images` takes a jq array of `{media_type, data}` with base64 data (jpeg, png, gif, webp).
 - Durable server mode: a step's output, status, next task and run close are written in one transaction. Step execution is at least once, completion exactly once. Several workers can share a database. A task whose worker dies is requeued, and retries survive a restart.
 - The worker no longer needs `wal_level=logical`: the default event mode is `notify`, and `wal` is optional.
 - The worker refuses HTTP calls to private addresses unless `ORKESTRA_ALLOW_PRIVATE_HTTP=1`.

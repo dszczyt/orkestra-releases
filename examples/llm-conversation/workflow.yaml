@@ -25,10 +25,9 @@ spec:
 # Both operations name the conversation "chat" and share provider and system
 # prompt (a literal, so `orkestra validate` checks it). The second call sees the
 # first turn without anything passing it along.
-kind: orkestra/operation/llm
+kind: orkestra/operation/llm/anthropic
 name: ask
 spec:
-  provider: anthropic
   auth: llm_auth
   model: claude-sonnet-5-5
   max_tokens: 256
@@ -37,10 +36,9 @@ spec:
   user: .input.question
 
 ---
-kind: orkestra/operation/llm
+kind: orkestra/operation/llm/anthropic
 name: translate
 spec:
-  provider: anthropic
   auth: llm_auth
   model: claude-sonnet-5-5
   max_tokens: 256

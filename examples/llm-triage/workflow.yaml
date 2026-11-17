@@ -28,10 +28,9 @@ spec:
   result_webhook: "https://webhook.site/your-token-here"
 
 ---
-kind: orkestra/operation/llm
+kind: orkestra/operation/llm/anthropic
 name: classify
 spec:
-  provider: anthropic
   auth: llm_auth
   model: claude-sonnet-5-5
   max_tokens: 256
